@@ -262,6 +262,16 @@ Panel {
         }
       }
 
+      // Faint OMAIPHONE behind the dropdown, out to its border.
+      NameBackdrop {
+        anchors.fill: column
+        anchors.margins: -(panel.padding - Style.space(2))
+        fontFamily: root.fontFamily
+        color: root.accent
+        copyWidth: 0.55
+        strength: 0.12
+      }
+
       Column {
         id: column
         anchors.left: parent.left

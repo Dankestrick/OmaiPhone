@@ -582,6 +582,13 @@ Item {
 
       MouseArea { anchors.fill: parent; onClicked: {} }
 
+      // Faint OMAIPHONE behind the card, out to its border.
+      NameBackdrop {
+        anchors.margins: Style.space(2)
+        fontFamily: root.fontFamily
+        color: root.selectedBackground
+      }
+
       Item {
         id: keyCatcher
         anchors.fill: parent
