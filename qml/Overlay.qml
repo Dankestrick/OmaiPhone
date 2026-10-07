@@ -30,6 +30,8 @@ Item {
       keyCatcher.forceActiveFocus()
   }
   property bool helpOn: false
+  property int emojiReturn: 0
+  property string emojiReturnKey: ""
   property string toAddress: ""
   property string toLabel: ""
   property string lastOpened: ""
@@ -361,6 +363,10 @@ Item {
     // Leave the text field. While it has focus it eats Ctrl+E, and the
     // emoji list only receives keys when the catcher behind it is focused.
     root.emojiFilter = ""
+    // The emoji list uses `selected` too; remember whose conversation this is.
+    root.emojiReturn = root.selected
+    var current = root.selected >= 0 && root.selected < shownModel.count ? shownModel.get(root.selected) : null
+    root.emojiReturnKey = current ? (current.key || current.address || "") : ""
     root.selected = 0
     root.screen = "emoji"
     root.composeFocus = false
@@ -393,7 +399,23 @@ Item {
       return
     composer.insert(composer.cursorPosition, picture)
     root.draft = composer.text
+    root.closeEmoji()
+  }
+
+  // Back to the conversation the emoji list was opened from, with its row selected again.
+  function closeEmoji() {
+    root.selected = root.emojiReturn
     root.screen = "inbox"
+    // New texts may have reordered the list meanwhile: find the same person again.
+    for (var i = 0; i < shownModel.count; i++) {
+      var row = shownModel.get(i)
+      if (root.emojiReturnKey && (row.key || row.address || "") === root.emojiReturnKey) {
+        root.selected = i
+        break
+      }
+    }
+    if (leftList && root.selected >= 0 && root.selected < shownModel.count)
+      leftList.positionViewAtIndex(root.selected, ListView.Contain)
     root.composeFocus = true
   }
 
@@ -638,10 +660,7 @@ Item {
 
           if (event.key === Qt.Key_Escape) {
             if (root.helpOn) root.helpOn = false
-            else if (root.screen === "emoji") {
-              root.screen = "inbox"
-              root.composeFocus = true
-            }
+            else if (root.screen === "emoji") root.closeEmoji()
             else if (root.composeFocus) root.cancelCompose()
             else if (root.filterText) root.filterText = ""
             else if (root.screen === "contacts") root.screen = "inbox"
