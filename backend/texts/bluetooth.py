@@ -41,6 +41,8 @@ from store import Store, runtime_dir, shared_contacts_file
 # solicited. We advertise the UUID only. We do not subscribe to it, so
 # other apps' notifications are never read.
 _ANCS_UUID = "7905f431-b5ce-4e99-a40f-4b1e122d00d0"
+# Failed downloads of one message before it is left as a preview.
+_MAX_DOWNLOAD_TRIES = 3
 _OBEX_CANDIDATES = (
     "/usr/lib/bluetooth/obexd",
     "/usr/libexec/bluetooth/obexd",
@@ -262,6 +264,10 @@ class BluetoothSession:
         self._map_path = ""
         self._contacts_mtime = 0.0
         self._message_paths: dict[str, str] = {}
+        # Downloads that came back empty or failed, per handle. A message the
+        # phone will not hand over (picture-only, deleted) would otherwise be
+        # fetched again every two seconds for as long as the link is up.
+        self._download_failures: dict[str, int] = {}
         self._obex_proc: subprocess.Popen | None = None
         self._announce_live = False
         self._listening = False
@@ -519,6 +525,8 @@ class BluetoothSession:
             return
         async with self.lock:
             for handle in self.store.incomplete_in_thread(thread):
+                if self._gave_up(handle):
+                    continue
                 await self._download_body(handle)
 
     async def _in_call(self) -> bool:
@@ -660,6 +668,8 @@ class BluetoothSession:
             current = self.store.record(handle)
             if current and current["body_complete"]:
                 continue
+            if self._gave_up(handle):
+                continue
             self._message_paths[handle] = str(path)
             await self._download_body(handle, announce=announce, sent=bool(props.get("Sent")))
             after = self.store.record(handle)
@@ -737,11 +747,21 @@ class BluetoothSession:
             await asyncio.sleep(0.05)
         return last
 
+    def _gave_up(self, handle: str) -> bool:
+        return self._download_failures.get(handle, 0) >= _MAX_DOWNLOAD_TRIES
+
     async def _download_body(self, handle: str, announce: bool = False, sent: bool | None = None) -> None:
         """Read one text from the phone and store the words plus the sender."""
         path = self._message_paths.get(handle)
         if not path:
             return
+        if await self._fetch_body(handle, path, announce, sent):
+            self._download_failures.pop(handle, None)
+        else:
+            self._download_failures[handle] = self._download_failures.get(handle, 0) + 1
+
+    async def _fetch_body(self, handle: str, path: str, announce: bool, sent: bool | None) -> bool:
+        """One download attempt. False when nothing usable came back."""
         target = runtime_dir() / f"incoming-{handle}.bmsg"
         raw = ""
         try:
@@ -753,7 +773,7 @@ class BluetoothSession:
                 await self._wait_transfer(transfer)
             raw = await self._read_bmessage(target)
         except Exception:
-            return
+            return False
         finally:
             try:
                 target.unlink()
@@ -768,7 +788,7 @@ class BluetoothSession:
         if not address:
             address = peer
         if not address or not text:
-            return
+            return False
         label = current["peer_label"] if current else ""
         _row, created = self.store.upsert_message(
             external_id=handle,
@@ -783,6 +803,7 @@ class BluetoothSession:
         )
         if announce and created and not sent:
             self.emit({"event": "message", "message": _row, "notify": True})
+        return True
 
     async def _watch_contacts(self) -> None:
         """Pick up the shared phone book whenever the calls part saves a new one."""
