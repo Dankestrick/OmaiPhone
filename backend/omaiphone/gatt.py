@@ -40,6 +40,16 @@ def device_path(bus, address):
     return None
 
 
+def has_services(bus, path):
+    """True when BlueZ lists GATT services under the device (its GATT client holds the link)."""
+    try:
+        objects = bus.call_sync(BLUEZ, "/", OM_IFACE, "GetManagedObjects", None,
+                                GLib.VariantType("(a{oa{sa{sv}}})"), Gio.DBusCallFlags.NONE, 10000, None).unpack()[0]
+    except GLib.Error:
+        return False
+    return any(path_.startswith(path + "/") and SERVICE_IFACE in ifaces for path_, ifaces in objects.items())
+
+
 def device_props(bus, path):
     try:
         return bus.call_sync(BLUEZ, path, PROPS_IFACE, "GetAll", GLib.Variant("(s)", (DEVICE_IFACE,)),

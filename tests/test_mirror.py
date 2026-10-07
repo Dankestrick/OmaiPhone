@@ -120,54 +120,6 @@ class FakeToaster:
 
 
 
-class SocketClient:
-    """The simulated iPhone behind a socket pair, offered to Mirror like gatt.BluezGatt."""
-
-    def __init__(self, sock, on_lost):
-        from omaiphone.att import AttClient
-        self.sock = sock
-        self.on_lost = on_lost
-        self.att = AttClient(self._send)
-        self.watch = GLib.io_add_watch(sock.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN | GLib.IO_HUP, self._readable)
-
-    def __getattr__(self, name):
-        return getattr(self.att, name)
-
-    @property
-    def on_notify(self):
-        return self.att.on_notify
-
-    @on_notify.setter
-    def on_notify(self, callback):
-        self.__dict__.setdefault("att", None)
-        self.att.on_notify = callback
-
-    def _send(self, packet):
-        try:
-            self.sock.send(packet)
-        except OSError:
-            pass
-
-    def _readable(self, _fd, _condition):
-        try:
-            packet = self.sock.recv(4096)
-        except BlockingIOError:
-            return True
-        except OSError:
-            packet = b""
-        if not packet:
-            self.watch = 0
-            self.on_lost("the iPhone closed the data channel")
-            return False
-        self.att.feed(packet)
-        return True
-
-    def close(self):
-        if self.watch:
-            GLib.source_remove(self.watch)
-            self.watch = 0
-        self.sock.close()
-
 
 @unittest.skipIf(GLib is None, "needs PyGObject (run with /usr/bin/python3)")
 class MirrorTests(unittest.TestCase):
@@ -203,7 +155,8 @@ class MirrorTests(unittest.TestCase):
         theirs.setblocking(False)
         self.phone_sock = theirs
         self.phone_watch = GLib.io_add_watch(theirs.fileno(), GLib.PRIORITY_DEFAULT, GLib.IO_IN, self.phone_readable)
-        return SocketClient(ours, on_lost)
+        from omaiphone.rawatt import RawAtt
+        return RawAtt(address, on_lost, opener=lambda _address: ours)
 
     def phone_readable(self, _fd, _condition):
         try:

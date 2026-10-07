@@ -10,7 +10,7 @@ import re
 
 from gi.repository import Gio, GLib
 
-from . import gatt, notifications
+from . import gatt, notifications, rawatt
 from .audio import load_config
 from .companion import Session
 
@@ -158,6 +158,13 @@ class Mirror:
             return
         except (LookupError, GLib.Error, OSError) as error:
             return self._lost(getattr(error, "message", None) or str(error))
+        if getattr(self.client, "connecting", False):
+            self._set_state("connecting")
+            self.client.on_ready = self._start_session
+        else:
+            self._start_session()
+
+    def _start_session(self):
         self.session = Session(lambda _packet: None, on_state=self._session_state, on_notification=self._notification,
                                on_removed=self._removed, on_media=lambda _media: self._publish(), client=self.client)
         self._ticks = 0
@@ -175,7 +182,10 @@ class Mirror:
         if not props.get("ServicesResolved"):
             raise NotReady()
         self._watch_device(path, on_lost)
-        return gatt.BluezGatt(self.bus, path)
+        if gatt.has_services(self.bus, path):
+            return gatt.BluezGatt(self.bus, path)
+        # bluetoothd has no GATT client on this link: open the ATT channel ourselves.
+        return rawatt.RawAtt(address, on_lost)
 
     def _again(self):
         self._retry_timer = 0
