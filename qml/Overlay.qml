@@ -275,15 +275,34 @@ Item {
     root.svc.markRead(row.key)
   }
 
+  // Picking another conversation drops the person the card was opened for.
+  // Otherwise every list refresh snaps the highlight back to them, and a
+  // reply typed now would still go to them instead of the one on screen.
+  function pickThread(index) {
+    if (index < 0 || index >= shownModel.count)
+      return
+    var row = shownModel.get(index)
+    root.selected = index
+    if (root.toLabel && !(row && row.pending)) {
+      root.toAddress = ""
+      root.toLabel = ""
+      // Removes the placeholder row; the clicked conversation stays selected.
+      root.rebuildShown()
+    }
+    root.openSelectedThread()
+  }
+
   function move(delta) {
     var model = root.paneModel()
     if (!model || model.count === 0)
       return
-    root.selected = (root.selected + delta + model.count) % model.count
+    var next = (root.selected + delta + model.count) % model.count
+    if (root.screen === "inbox")
+      root.pickThread(next)
+    else
+      root.selected = next
     if (leftList)
       leftList.positionViewAtIndex(root.selected, ListView.Contain)
-    if (root.screen === "inbox")
-      root.openSelectedThread()
   }
 
   function rowText(index) {
@@ -835,9 +854,12 @@ Item {
                 MouseArea {
                   anchors.fill: parent
                   onClicked: {
+                    if (root.screen === "inbox") {
+                      root.pickThread(index)
+                      return
+                    }
                     root.selected = index
-                    if (root.screen === "inbox") root.openSelectedThread()
-                    else if (root.screen === "contacts") root.pickContact()
+                    if (root.screen === "contacts") root.pickContact()
                     else if (root.screen === "setup") root.pairSelected(false)
                   }
                 }
@@ -852,73 +874,94 @@ Item {
               color: root.border
             }
 
-            ListView {
+            // A plain column, not a ListView. The bubbles settle their height
+            // after they are created, and a ListView that scrolls to the end
+            // while that happens can rebuild its rows forever: the shell froze
+            // and ate memory until the PC locked up. A conversation is short,
+            // so every bubble is built once and the view just scrolls.
+            Flickable {
               id: transcript
+              readonly property int count: bubbles.count
               visible: root.screen === "inbox"
               x: leftList.width + Style.space(8)
-              width: parent.width - leftList.width - Style.space(8)
+              width: Math.max(0, parent.width - leftList.width - Style.space(8))
               height: parent.height
               clip: true
-              model: root.svc ? root.svc.messages : 0
+              contentWidth: width
+              contentHeight: bubbleList.height
               boundsBehavior: Flickable.StopAtBounds
-              onCountChanged: if (count > 0) positionViewAtEnd()
 
-              delegate: Item {
-                required property string body
-                required property string direction
-                required property string timestamp
+              function scrollToEnd() {
+                contentY = Math.max(0, contentHeight - height)
+              }
+              onContentHeightChanged: Qt.callLater(scrollToEnd)
+              onHeightChanged: Qt.callLater(scrollToEnd)
+
+              Column {
+                id: bubbleList
                 width: transcript.width
-                height: bubbleColumn.height + Style.space(10)
 
-                // A hidden line measures the words so the bubble can hug them
-                // instead of stretching across the whole conversation.
-                Text {
-                  id: measure
-                  visible: false
-                  // Plain text on purpose. Qt's default AutoText parser can
-                  // treat a message as HTML and start an image download while
-                  // it measures the width, even when this line is hidden.
-                  textFormat: Text.PlainText
-                  text: body
-                  font.family: root.fontFamily
-                  font.pixelSize: Style.font.body
-                }
+                Repeater {
+                  id: bubbles
+                  model: root.svc ? root.svc.messages : 0
+                  delegate: Item {
+                    required property string body
+                    required property string direction
+                    required property string timestamp
+                    width: transcript.width
+                    height: bubbleColumn.height + Style.space(10)
 
-                Column {
-                  id: bubbleColumn
-                  spacing: Style.space(3)
-                  width: bubble.width
-                  x: direction === "out" ? parent.width - width - Style.space(6) : Style.space(6)
-
-                  Rectangle {
-                    id: bubble
-                    radius: Style.space(8)
-                    color: direction === "out" ? root.selectedBackground : root.incomingBubble
-                    width: bodyText.width + Style.space(20)
-                    height: bodyText.implicitHeight + Style.space(14)
-
+                    // A hidden line measures the words so the bubble can hug them
+                    // instead of stretching across the whole conversation.
                     Text {
-                      id: bodyText
-                      x: Style.space(10)
-                      y: Style.space(7)
-                      width: Math.min(measure.implicitWidth, transcript.width * 0.62)
-                      wrapMode: Text.Wrap
-                      textFormat: Text.RichText
-                      text: root.withEmojiFont(body)
-                      color: direction === "out" ? root.selectedText : root.foreground
+                      id: measure
+                      visible: false
+                      // Plain text on purpose. Qt's default AutoText parser can
+                      // treat a message as HTML and start an image download while
+                      // it measures the width, even when this line is hidden.
+                      textFormat: Text.PlainText
+                      text: body
                       font.family: root.fontFamily
                       font.pixelSize: Style.font.body
                     }
-                  }
 
-                  Text {
-                    width: bubble.width
-                    horizontalAlignment: direction === "out" ? Text.AlignRight : Text.AlignLeft
-                    textFormat: Text.PlainText
-                    text: (direction === "out" ? "sent" : "received") + "  " + root.clockText(timestamp)
-                    color: root.muted
-                    font.family: root.fontFamily
-                    font.pixelSize: Style.font.caption
+                    Column {
+                      id: bubbleColumn
+                      spacing: Style.space(3)
+                      width: bubble.width
+                      x: direction === "out" ? parent.width - width - Style.space(6) : Style.space(6)
+
+                      Rectangle {
+                        id: bubble
+                        radius: Style.space(8)
+                        color: direction === "out" ? root.selectedBackground : root.incomingBubble
+                        width: bodyText.width + Style.space(20)
+                        height: bodyText.implicitHeight + Style.space(14)
+
+                        Text {
+                          id: bodyText
+                          x: Style.space(10)
+                          y: Style.space(7)
+                          width: Math.max(1, Math.min(measure.implicitWidth, transcript.width * 0.62))
+                          wrapMode: Text.Wrap
+                          textFormat: Text.RichText
+                          text: root.withEmojiFont(body)
+                          color: direction === "out" ? root.selectedText : root.foreground
+                          font.family: root.fontFamily
+                          font.pixelSize: Style.font.body
+                        }
+                      }
+
+                      Text {
+                        width: bubble.width
+                        horizontalAlignment: direction === "out" ? Text.AlignRight : Text.AlignLeft
+                        textFormat: Text.PlainText
+                        text: (direction === "out" ? "sent" : "received") + "  " + root.clockText(timestamp)
+                        color: root.muted
+                        font.family: root.fontFamily
+                        font.pixelSize: Style.font.caption
+                      }
+                    }
                   }
                 }
               }
