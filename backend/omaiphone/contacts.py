@@ -186,7 +186,7 @@ def _call(bus, path, iface, method, args=None, reply=None, timeout=60000):
     except GLib.Error as error:
         text = error.message or ""
         if "ServiceUnknown" in text or "not provided by any .service" in text:
-            raise ContactsError("BlueZ OBEX service missing - install it: sudo pacman -S bluez-obex")
+            raise ContactsError("BlueZ OBEX service missing - install it: omarchy pkg add bluez-obex")
         if "Forbidden" in text or "Not Authorized" in text or "Unauthorized" in text:
             raise ContactsError("the iPhone refused access - on the iPhone open Settings > Bluetooth > (i) next "
                                 "to this PC and turn on 'Sync Contacts'")

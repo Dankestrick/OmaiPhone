@@ -34,9 +34,10 @@ driven by the keyboard.
 
 ## Requirements
 
-- An iPhone and a Bluetooth adapter that holds a steady link to it. Some
-  built-in Realtek combo cards drop the link (`hci0: link tx timeout` in
-  `journalctl -k`); a USB adapter such as the TP-Link UB500 fixes that.
+- An iPhone and any Bluetooth 4.0 or newer adapter that works with BlueZ.
+  Tested with a TP-Link UB500 Plus. Most built-in Intel adapters work well.
+  Some built-in Realtek combo cards never load their firmware and drop the
+  link (`hci0: link tx timeout` in `journalctl -k`); a USB adapter fixes that.
 - PipeWire with WirePlumber (Omarchy's default). Calls use PipeWire's
   hands-free telephony service.
 - These packages, all in Arch's `extra` repo:
