@@ -8,7 +8,7 @@ sys.path.insert(0, os.path.dirname(__file__))
 
 from omaiphone import ancs, att  # noqa: E402
 from omaiphone.companion import COMMAND_TIMEOUT, REQUEST_TIMEOUT, Session, fallback_app_name  # noqa: E402
-from sim_phone import SimPhone, connect  # noqa: E402
+from sim_phone import BATTERY_LEVEL, SimPhone, connect  # noqa: E402
 
 
 class Recorder:
@@ -156,7 +156,12 @@ class SessionTests(unittest.TestCase):
         recorder, session, _pump = started(phone)
         self.assertEqual(recorder.states, [("ready", "")])
         self.assertEqual(phone.subscribed, {ancs.DATA_SOURCE, ancs.NOTIFICATION_SOURCE, ancs.ENTITY_UPDATE,
-                                            ancs.REMOTE_COMMAND})
+                                            ancs.REMOTE_COMMAND, BATTERY_LEVEL})
+        # the exact level from the Battery Service, then its updates
+        self.assertEqual(session.battery, 73)
+        phone.set_battery(28)
+        _pump()
+        self.assertEqual(session.battery, 28)
         self.assertEqual(recorder.notifications, [{
             "uid": 7, "appId": "com.apple.MobileSMS", "app": "Messages", "title": "Mum", "subtitle": "",
             "message": "Call me back", "date": "2026-10-02T09:41:18", "category": "social", "silent": False,

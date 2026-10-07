@@ -77,8 +77,9 @@ def toast_text(notification):
     return app, title, "\n".join(lines)
 
 
-def snapshot(enabled, state="off", detail="", store=None, media=None):
+def snapshot(enabled, state="off", detail="", store=None, media=None, battery=None):
     return {
+        "battery": battery if enabled else None,
         "enabled": bool(enabled),
         "state": state if enabled else "off",
         "detail": detail if enabled else "",

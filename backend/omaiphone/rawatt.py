@@ -68,6 +68,9 @@ class RawAtt:
     def subscribe(self, characteristic, on_done):
         self.att.subscribe(characteristic, on_done)
 
+    def read(self, handle, on_done):
+        self.att.read(handle, on_done)
+
     def write(self, handle, value, on_done=None):
         self.att.write(handle, value, on_done)
 

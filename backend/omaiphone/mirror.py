@@ -166,7 +166,8 @@ class Mirror:
 
     def _start_session(self):
         self.session = Session(lambda _packet: None, on_state=self._session_state, on_notification=self._notification,
-                               on_removed=self._removed, on_media=lambda _media: self._publish(), client=self.client)
+                               on_removed=self._removed, on_media=lambda _media: self._publish(), client=self.client,
+                               on_battery=lambda _level: self._publish())
         self._ticks = 0
         self._ticker = GLib.timeout_add_seconds(TICK_SECONDS, self._tick)
         self._set_state("discovering")
@@ -280,7 +281,8 @@ class Mirror:
 
     def snapshot(self):
         media = self.session.media if self.session else None
-        return notifications.snapshot(self.enabled, self.state, self.detail, self.store, media)
+        battery = self.session.battery if self.session else None
+        return notifications.snapshot(self.enabled, self.state, self.detail, self.store, media, battery)
 
     def _publish(self):
         if self._publish_timer:

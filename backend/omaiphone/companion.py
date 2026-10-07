@@ -12,6 +12,8 @@ import time
 from . import ancs
 from .att import AttClient, AttError
 
+BATTERY_SERVICE = "0000180f-0000-1000-8000-00805f9b34fb"
+BATTERY_LEVEL = "00002a19-0000-1000-8000-00805f9b34fb"
 REQUEST_TIMEOUT = 12   # seconds without an answer before the link counts as dead
 COMMAND_TIMEOUT = 6    # seconds to wait for the details of one notification
 MAX_QUEUED = 300
@@ -27,7 +29,8 @@ class Session:
     """States: discovering, ready, needs-permission, unsupported, failed."""
 
     def __init__(self, send, on_state=None, on_notification=None, on_removed=None, on_media=None, clock=time.monotonic,
-                 client=None):
+                 client=None, on_battery=None):
+        self.on_battery = on_battery or (lambda level: None)
         # `client` replaces the raw ATT client, e.g. gatt.BluezGatt (BlueZ's own GATT objects).
         if client is not None:
             client.on_notify = self._on_notify
@@ -45,6 +48,8 @@ class Session:
                       "playing": False, "commands": []}
         self._handles = {}        # characteristic uuid -> value handle
         self._media_range = None  # handle range of the media service, if the phone has one
+        self._battery_range = None  # standard Battery Service: the exact percentage
+        self.battery = None
         self._events = {}         # uid -> latest Notification Source event
         self._app_names = {}      # app id -> display name
         self._waiting = {}        # app id -> notifications held until its name is known
@@ -98,6 +103,7 @@ class Session:
             return self._fail("service discovery failed: %s" % error)
         ranges = {uuid: (first, last) for first, last, uuid in services}
         self._media_range = ranges.get(ancs.MEDIA_SERVICE)
+        self._battery_range = ranges.get(BATTERY_SERVICE)
         if ancs.SERVICE not in ranges:
             return self._set_state("unsupported", "this phone offers no notification service")
         first, last = ranges[ancs.SERVICE]
@@ -125,6 +131,7 @@ class Session:
                 return self._subscription_failed(failure)
             self._set_state("ready")
             self._start_media()
+            self._start_battery()
 
         self.att.subscribe(characteristics[ancs.DATA_SOURCE], data_source_on)
 
@@ -137,6 +144,30 @@ class Session:
         if not self._media_range:
             return
         self.att.discover_characteristics(self._media_range[0], self._media_range[1], self._media_service_found)
+
+    def _start_battery(self):
+        if not self._battery_range:
+            return
+        self.att.discover_characteristics(self._battery_range[0], self._battery_range[1], self._battery_found)
+
+    def _battery_found(self, characteristics, error):
+        # The hands-free link reports battery in 20 % steps; this service has the exact level.
+        level = characteristics.get(BATTERY_LEVEL) if error is None else None
+        if not level:
+            return
+        self._handles[BATTERY_LEVEL] = level["value"]
+
+        def read(value, failure):
+            if failure is None and value:
+                self._battery(value)
+
+        self.att.read(level["value"], read)
+        self.att.subscribe(level, lambda _failure: None)
+
+    def _battery(self, value):
+        if value and 0 <= value[0] <= 100 and value[0] != self.battery:
+            self.battery = value[0]
+            self.on_battery(self.battery)
 
     def _media_service_found(self, characteristics, error):
         # Media is a bonus: whatever goes wrong here leaves notifications running.
@@ -172,6 +203,8 @@ class Session:
             if update:
                 self.media.update(update)
                 self.on_media(dict(self.media))
+        elif handle == self._handles.get(BATTERY_LEVEL):
+            self._battery(value)
         elif handle == self._handles.get(ancs.REMOTE_COMMAND):
             self.media["commands"] = ancs.parse_supported_commands(value)
             self.on_media(dict(self.media))

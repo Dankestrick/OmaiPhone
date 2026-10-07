@@ -110,6 +110,10 @@ def find_information_request(start, end):
     return struct.pack("<BHH", OP_FIND_INFO_REQ, start, end)
 
 
+def read_request(handle):
+    return struct.pack("<BH", OP_READ_REQ, handle)
+
+
 def write_request(handle, value):
     return struct.pack("<BH", OP_WRITE_REQ, handle) + bytes(value)
 
@@ -307,6 +311,11 @@ class AttClient:
                 return on_done(AttError(ERR_ATTRIBUTE_NOT_FOUND, characteristic["value"]))
             self.request(write_request(handle, b"\x01\x00"), lambda _pdu, failure: on_done(failure))
         self.find_cccd(characteristic, found)
+
+    def read(self, handle, on_done):
+        """on_done(value, None) or on_done(None, error)."""
+        self.request(read_request(handle), lambda pdu, error: on_done(None, error) if error is not None
+                     else on_done(bytes(pdu[1:]), None))
 
     def write(self, handle, value, on_done=None):
         self.request(write_request(handle, value), lambda _pdu, error: on_done(error) if on_done else None)

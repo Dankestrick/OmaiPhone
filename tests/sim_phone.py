@@ -13,6 +13,7 @@ from omaiphone import ancs, att
 PRIMARY = att.BASE_UUID % att.UUID_PRIMARY_SERVICE
 CHARACTERISTIC = att.BASE_UUID % att.UUID_CHARACTERISTIC
 CCCD = att.BASE_UUID % att.UUID_CCCD
+BATTERY_LEVEL = att.BASE_UUID % 0x2A19
 
 # (service uuid, first handle, last handle, [(characteristic uuid, properties, has cccd)])
 LAYOUT = [
@@ -31,6 +32,7 @@ LAYOUT = [
 
 class SimPhone:
     def __init__(self, fragment=18, authorized=True, with_media=True, with_ancs=True):
+        self.battery = 73                 # Battery Service level, in percent
         self.fragment = fragment          # bytes of notification detail per packet
         self.authorized = authorized
         self.outbox = deque()             # packets on their way to the computer
@@ -98,6 +100,10 @@ class SimPhone:
         self._notify(ancs.NOTIFICATION_SOURCE, struct.pack("<BBBBI", event, n["flags"] | extra_flags, n["category"],
                                                             len(self.notifications), uid))
 
+    def set_battery(self, level):
+        self.battery = level
+        self._notify(BATTERY_LEVEL, bytes([level]))
+
     def _notify(self, uuid, value):
         self.outbox.append(struct.pack("<BH", att.OP_NOTIFY, self.handles[uuid]) + value)
 
@@ -130,6 +136,11 @@ class SimPhone:
             self.outbox.append(bytes([att.OP_FIND_INFO_RSP, 1 if is_short else 2]) + b"".join(entries))
         elif opcode == att.OP_WRITE_REQ:
             self._write(struct.unpack_from("<H", pdu, 1)[0], pdu[3:])
+        elif opcode == att.OP_READ_REQ:
+            handle = struct.unpack_from("<H", pdu, 1)[0]
+            if handle != self.handles.get(BATTERY_LEVEL):
+                return self._error(opcode, handle, att.ERR_READ_NOT_PERMITTED)
+            self.outbox.append(bytes([att.OP_READ_RSP, self.battery]))
         else:
             self._error(opcode, 0, att.ERR_REQUEST_NOT_SUPPORTED)
 

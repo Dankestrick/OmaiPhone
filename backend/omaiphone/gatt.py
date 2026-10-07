@@ -136,6 +136,17 @@ class BluezGatt:
         self.bus.call(BLUEZ, path, CHAR_IFACE, "StartNotify", None, None, Gio.DBusCallFlags.NONE,
                       TIMEOUT_MS, None, reply)
 
+    def read(self, handle, on_done):
+        def reply(bus, result):
+            try:
+                value = bytes(bus.call_finish(result).unpack()[0])
+            except GLib.Error as error:
+                return on_done(None, _error(error))
+            on_done(value, None)
+
+        self.bus.call(BLUEZ, handle, CHAR_IFACE, "ReadValue", GLib.Variant("(a{sv})", ({},)),
+                      GLib.VariantType("(ay)"), Gio.DBusCallFlags.NONE, TIMEOUT_MS, None, reply)
+
     def write(self, handle, value, on_done=None):
         options = {"type": GLib.Variant("s", "request")}
 

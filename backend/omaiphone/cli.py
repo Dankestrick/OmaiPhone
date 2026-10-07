@@ -91,6 +91,10 @@ def collect_status(mask_numbers=False):
     elif mirror["state"] == "off":
         mirror["state"] = "waiting"   # switched on, the service has not reported yet
     mirror["count"] = len(mirror["notifications"])
+    # The Battery Service read by the background service is exact; the hands-free
+    # link only reports 20 % steps.
+    if mirror.get("battery") is not None and status["phone"] and status["phone"]["connected"]:
+        status["phone"]["battery"] = mirror["battery"]
     if mask_numbers:
         mirror["notifications"] = []   # diagnostics never carry notification texts
     status["mirror"] = mirror
