@@ -1,0 +1,79 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.dankestrick.omaiphone",
+  "name": "OmaiPhone",
+  "version": "0.1.0",
+  "author": "Dankestrick",
+  "license": "MIT",
+  "description": "Your iPhone on Omarchy over Bluetooth: take and make calls with the PC's microphone and speakers, read and send texts, see the iPhone's notifications, control its music and check its battery. No app on the phone, no cloud.",
+  "dependencies": [
+    {
+      "name": "python",
+      "package": "python",
+      "why": "Runs the two background programs"
+    },
+    {
+      "name": "PyGObject",
+      "package": "python-gobject",
+      "why": "Calls, contacts, notifications and music talk to PipeWire and BlueZ over D-Bus"
+    },
+    {
+      "name": "dbus-next",
+      "package": "python-dbus-next",
+      "why": "Texts talk to BlueZ's OBEX service over D-Bus"
+    },
+    {
+      "name": "obexd",
+      "package": "bluez-obex",
+      "why": "Carries texts (MAP) and the phone book (PBAP)"
+    },
+    {
+      "name": "pw-play",
+      "package": "pipewire-audio",
+      "why": "Rings on the PC; its WebRTC filter removes noise and echo during calls"
+    },
+    {
+      "name": "pactl",
+      "package": "libpulse",
+      "why": "Finds and mutes the call's audio streams"
+    },
+    {
+      "name": "notify-send",
+      "package": "libnotify",
+      "why": "Pop-ups for new texts"
+    },
+    {
+      "name": "setpriv",
+      "package": "util-linux",
+      "why": "Ends the background programs together with the shell"
+    }
+  ],
+  "kinds": [
+    "service",
+    "bar-widget",
+    "overlay"
+  ],
+  "keepLoaded": true,
+  "entryPoints": {
+    "service": "qml/Service.qml",
+    "barWidget": "qml/BarWidget.qml",
+    "overlay": "qml/Overlay.qml"
+  },
+  "barWidget": {
+    "displayName": "iPhone",
+    "description": "Calls, texts, notifications, music and battery of your iPhone.",
+    "category": "Network",
+    "aliases": [
+      "iphone",
+      "phone",
+      "call",
+      "texts",
+      "messages",
+      "sms",
+      "imessage",
+      "notifications"
+    ],
+    "allowMultiple": false,
+    "defaultSection": "right"
+  }
+}
