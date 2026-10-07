@@ -78,14 +78,18 @@ Item {
     } catch (ignore) {
       payload = null
     }
-    if (payload && payload.to && root.screen === "inbox")
-      Qt.callLater(function() { root.startConversation(String(payload.to), String(payload.label || payload.to)) })
     // A saved phone retries the message link. A missing phone starts a scan.
     if (root.svc && (root.svc.textState === "waiting_for_switches" || root.svc.textState === "phone_nearby"))
       root.svc.reconnect()
     else if (root.screen === "setup" && root.svc)
       root.svc.scan()
-    Qt.callLater(function() { keyCatcher.forceActiveFocus() })
+    Qt.callLater(function() {
+      keyCatcher.forceActiveFocus()
+      // Opened from the panel for one person: start typing to them right away.
+      // This runs after the focus above so the reply line keeps the keyboard.
+      if (payload && payload.to && root.screen === "inbox")
+        root.startConversation(String(payload.to), String(payload.label || payload.to))
+    })
   }
 
   function close() {
