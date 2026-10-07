@@ -242,7 +242,7 @@ class Daemon:
         if target == CallState.INCOMING:
             self._notify_incoming(path)
         elif self.notification_call == path:
-            self._close_notification()
+            self._close_notification("Call answered" if target == CallState.ACTIVE else None)
 
     def _record(self, info):
         history = info["machine"].history
@@ -262,7 +262,7 @@ class Daemon:
 
     def _remove(self, path):
         if self.notification_call == path:
-            self._close_notification()
+            self._close_notification("Missed call")
         info = self.calls.pop(path, None)
         if info:
             self._record(info)
@@ -343,21 +343,43 @@ class Daemon:
         # "default" action. Answer/Decline buttons live in the bar panel.
         body += "\nClick to answer · Decline in the iPhone panel"
         actions = ["default", "Answer", "answer", "Answer", "decline", "Decline"]
-        hints = {"urgency": GLib.Variant("y", 2), "category": GLib.Variant("s", "call.incoming"),
-                 "resident": GLib.Variant("b", True)}
+        # Omarchy keeps a critical pop-up until it is clicked and ignores
+        # CloseNotification, so the call pop-up is a normal one with a timeout
+        # and gets replaced (same id) once the call is answered or missed.
+        hints = {"urgency": GLib.Variant("y", 1), "category": GLib.Variant("s", "call.incoming")}
         try:
             result = self.tel.bus.call_sync(
                 NOTIFY, NOTIFY_PATH, NOTIFY, "Notify",
                 GLib.Variant("(susssasa{sv}i)", ("iPhone", self.notification_id, "phone", title, body,
-                                                 actions, hints, 0)),
+                                                 actions, hints, 30000)),
                 GLib.VariantType("(u)"), Gio.DBusCallFlags.NONE, 5000, None)
             self.notification_id = result.unpack()[0]
             self.notification_call = path
         except GLib.Error as error:
             log(f"notification failed: {error.message}")
 
-    def _close_notification(self):
+    def _close_notification(self, outcome=None):
+        """Take the incoming-call pop-up down.
+
+        Omarchy ignores CloseNotification for pop-ups that are on screen, so the
+        pop-up is replaced (same id) with a short one saying what happened.
+        """
         if self.notification_id:
+            info = self.calls.get(self.notification_call) or {}
+            who = info.get("name") or info.get("number") or "Unknown caller"
+            title, urgency, timeout = (outcome, 1, 6000) if outcome else ("Call ended", 0, 3000)
+            if outcome == "Call answered":
+                urgency, timeout = 0, 3000
+            try:
+                self.tel.bus.call_sync(
+                    NOTIFY, NOTIFY_PATH, NOTIFY, "Notify",
+                    GLib.Variant("(susssasa{sv}i)", ("iPhone", self.notification_id, "phone", title, who, [],
+                                                     {"urgency": GLib.Variant("y", urgency),
+                                                      "transient": GLib.Variant("b", outcome != "Missed call")},
+                                                     timeout)),
+                    GLib.VariantType("(u)"), Gio.DBusCallFlags.NONE, 5000, None)
+            except GLib.Error:
+                pass
             try:
                 self.tel.bus.call_sync(NOTIFY, NOTIFY_PATH, NOTIFY, "CloseNotification",
                                        GLib.Variant("(u)", (self.notification_id,)), None,
@@ -374,6 +396,8 @@ class Daemon:
         path = self.notification_call
         try:
             if action in ("default", "answer"):
+                # Same as the panel's Answer: this call's audio belongs to the PC.
+                self.tel.set_reject_sco(False, self.addresses.get(ag_path_of(path)) or None)
                 self.tel.answer(path)
                 log("answered from notification")
             elif action == "decline":
