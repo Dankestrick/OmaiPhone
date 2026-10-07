@@ -50,8 +50,11 @@ Panel {
   property bool keypadOpen: false
   readonly property var filteredContacts: filterContacts(contactQuery)
 
+  readonly property bool bluetoothOff: !!(status && status.bluetooth && !status.bluetooth.powered)
+
   readonly property string statusLine: {
     if (!status) return "Starting"
+    if (bluetoothOff) return "Bluetooth is off"
     if (!phone) return "No iPhone paired"
     if (!connected) return phone.connected ? "Connecting" : "Not connected"
     if (ringing) return "Incoming call"
@@ -330,7 +333,28 @@ Panel {
         }
 
         Button {
-          visible: root.phone !== null && !root.connected
+          visible: root.bluetoothOff
+          width: parent.width
+          iconText: "󰂯"
+          text: "Turn on Bluetooth"
+          foreground: root.fg
+          fontFamily: root.fontFamily
+          bordered: true
+          onClicked: {
+            // The same switch as Omarchy's Bluetooth panel (an rfkill soft block).
+            Quickshell.execDetached(["rfkill", "unblock", "bluetooth"])
+            reconnectLater.restart()
+          }
+        }
+
+        Timer {
+          id: reconnectLater
+          interval: 2500
+          onTriggered: root.run(["connect"])
+        }
+
+        Button {
+          visible: root.phone !== null && !root.connected && !root.bluetoothOff
           width: parent.width
           iconText: "󰂱"
           text: "Connect iPhone"
@@ -427,6 +451,39 @@ Panel {
               bordered: true
               selected: root.keypadOpen
               onClicked: root.keypadOpen = !root.keypadOpen
+            }
+          }
+
+          // Call volume as the iPhone reports it (0-15). At 0 the call is silent on the PC.
+          Item {
+            visible: !root.ringing && !!root.status && !!root.status.volume && root.status.volume.speaker !== null
+                     && root.status.volume.speaker !== undefined
+            width: parent.width
+            implicitHeight: volumeSlider.implicitHeight
+
+            Text {
+              id: volumeIcon
+              anchors.left: parent.left
+              anchors.verticalCenter: parent.verticalCenter
+              text: "󰕾"
+              color: root.fg
+              font.family: root.fontFamily
+              font.pixelSize: Style.font.icon
+            }
+
+            PanelSlider {
+              id: volumeSlider
+              bar: root.bar
+              anchors.left: volumeIcon.right
+              anchors.leftMargin: Style.space(10)
+              anchors.right: parent.right
+              anchors.verticalCenter: parent.verticalCenter
+              minimum: 0
+              maximum: 100
+              step: 1
+              integer: true
+              value: root.status && root.status.volume ? Math.round(Number(root.status.volume.speaker || 0) * 100 / 15) : 0
+              onReleased: function(v) { root.run(["volume", String(Math.round(v))]) }
             }
           }
 

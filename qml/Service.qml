@@ -171,7 +171,7 @@ Item {
       waitForEnd: true
       onStreamFinished: {
         var message = String(text).trim()
-        if (message !== "") root.lastError = message.replace(/^omaiphone-ctl:\s*/, "")
+        if (message !== "") root.lastError = message.replace(/^omaiphone(-ctl)?:\s*/, "")
       }
     }
   }

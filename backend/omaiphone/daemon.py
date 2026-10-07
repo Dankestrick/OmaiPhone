@@ -292,7 +292,19 @@ class Daemon:
             if self.addresses and not self.calls:
                 self._calls_stay_on_phone()
 
+    def _check_call_volume(self, address):
+        """The iPhone remembers a call volume per device; at 0 every call on the PC is silent."""
+        try:
+            _path, ifaces = self.tel.gateway(address or None)
+            level = ifaces["org.pipewire.Telephony.AudioGateway1"].get("SpeakerVolume") if ifaces else None
+            if level == 0:
+                self.tel.set_speaker_volume(15, address or None)
+                log("call volume on the iPhone was 0 for this PC; set it to full")
+        except (TelephonyError, KeyError) as error:
+            log(f"could not check the call volume: {error}")
+
     def _report_audio(self, address):
+        self._check_call_volume(address)
         try:
             info = self.router.describe(address)
             if info["muted"]:
