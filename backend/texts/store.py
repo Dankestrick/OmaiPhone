@@ -17,12 +17,19 @@ from pathlib import Path
 from protocol import address_from_thread, present_message, thread_key
 
 
+def _ensure_mode(path: Path, mode: int) -> None:
+    """chmod only when needed. A chmod always fires an inotify event, and the
+    Omarchy shell rescans the app list on any change under ~/.local/share."""
+    if path.stat().st_mode & 0o777 != mode:
+        os.chmod(path, mode)
+
+
 def data_dir() -> Path:
     """Directory that holds the database. Created as mode 0700."""
     root = os.environ.get("XDG_DATA_HOME") or str(Path.home() / ".local" / "share")
     path = Path(root) / "omaiphone"
     path.mkdir(parents=True, exist_ok=True)
-    os.chmod(path, 0o700)
+    _ensure_mode(path, 0o700)
     return path
 
 
@@ -36,7 +43,7 @@ def runtime_dir() -> Path:
     root = os.environ.get("XDG_RUNTIME_DIR") or str(Path("/tmp") / f"omaiphone-{os.getuid()}")
     path = Path(root) / "omaiphone"
     path.mkdir(parents=True, exist_ok=True)
-    os.chmod(path, 0o700)
+    _ensure_mode(path, 0o700)
     return path
 
 
@@ -46,14 +53,14 @@ class Store:
     def __init__(self, path: Path | None = None):
         self.path = path or (data_dir() / "messages.db")
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        os.chmod(self.path.parent, 0o700)
+        _ensure_mode(self.path.parent, 0o700)
         self._db = sqlite3.connect(self.path)
         self._db.row_factory = sqlite3.Row
         # DELETE mode keeps the texts in one file. WAL would create extra
         # files that are easy to leave world-readable.
         self._db.execute("PRAGMA journal_mode=DELETE")
         self._migrate()
-        os.chmod(self.path, 0o600)
+        _ensure_mode(self.path, 0o600)
 
     def close(self) -> None:
         self._db.close()
