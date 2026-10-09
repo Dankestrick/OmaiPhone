@@ -433,5 +433,29 @@ class TelephonyObjectsTests(unittest.TestCase):
         self.assertEqual(calls[0]["state"], "active")
 
 
+class PrivateWriteTests(unittest.TestCase):
+    def test_write_private_is_0600_and_leaves_no_temp_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            path = os.path.join(folder, "sub", "state.json")
+            audio.write_private(path, "{}")
+            audio.write_private(path, '{"a": 1}')
+            self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.assertEqual(os.listdir(os.path.dirname(path)), ["state.json"])
+            with open(path) as handle:
+                self.assertEqual(json.load(handle), {"a": 1})
+
+
+class JsonCapTests(unittest.TestCase):
+    def test_oversized_output_prints_the_fallback(self):
+        import io
+        from contextlib import redirect_stdout
+        from omaiphone import cli
+        out = io.StringIO()
+        with redirect_stdout(out):
+            cli.emit_json(["x" * cli.MAX_JSON_BYTES], [])
+            cli.emit_json({"ok": True}, [])
+        self.assertEqual(out.getvalue().split("\n")[:2], ["[]", '{"ok": true}'])
+
+
 if __name__ == "__main__":
     unittest.main()

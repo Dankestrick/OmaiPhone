@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import tempfile
 import time
 from pathlib import Path
 
@@ -111,8 +112,9 @@ def _read_adapter_class() -> tuple[int, int] | None:
             capture_output=True,
             text=True,
             check=False,
+            timeout=10,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return None
     match = re.search(r"class (0x[0-9a-fA-F]+)", result.stdout or "")
     if not match:
@@ -131,8 +133,9 @@ def _set_adapter_class(major: int, minor: int) -> bool:
             capture_output=True,
             text=True,
             check=False,
+            timeout=10,
         )
-    except FileNotFoundError:
+    except (FileNotFoundError, subprocess.TimeoutExpired):
         return False
     return result.returncode == 0
 
@@ -474,8 +477,8 @@ class BluetoothSession:
 
             payload = build_bmessage(value if kind == "email" else value, body, own)
             folder = runtime_dir()
-            path = folder / "outgoing.bmsg"
-            fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+            fd, name = tempfile.mkstemp(prefix="outgoing-", suffix=".bmsg", dir=folder)
+            path = Path(name)
             try:
                 os.write(fd, payload.encode("utf-8"))
             finally:

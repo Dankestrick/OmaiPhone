@@ -29,6 +29,11 @@ Item {
   readonly property string cli: fileUrl("../backend/omaiphone-ctl")
   readonly property string textsDaemon: fileUrl("../backend/texts/messagesd.py")
 
+  // One-shot CLI calls get a hard time limit. The CLI caps what it prints.
+  function ctl(seconds, args) {
+    return ["timeout", "-k", "5", String(seconds), root.cli].concat(args)
+  }
+
   // ---------------------------------------------------------------------------
   // Calls, contacts, notifications, music
   // ---------------------------------------------------------------------------
@@ -77,7 +82,8 @@ Item {
 
   function pump() {
     if (actionProcess.running || queue.length === 0) return
-    actionProcess.command = [root.cli].concat(queue[0])
+    // Contact sync and connecting can take a while over Bluetooth.
+    actionProcess.command = root.ctl(120, queue[0])
     queue = queue.slice(1)
     actionProcess.running = true
   }
@@ -179,7 +185,7 @@ Item {
   // Mute and similar changes emit no D-Bus signal, so read the state once after every action.
   Process {
     id: statusOnceProcess
-    command: [root.cli, "status", "--json"]
+    command: root.ctl(15, ["status", "--json"])
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.applyStatus(text)
@@ -188,7 +194,7 @@ Item {
 
   Process {
     id: contactsProcess
-    command: [root.cli, "contacts", "list", "--json"]
+    command: root.ctl(15, ["contacts", "list", "--json"])
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.loadContacts(text)
@@ -197,7 +203,7 @@ Item {
 
   Process {
     id: historyProcess
-    command: [root.cli, "history", "--json"]
+    command: root.ctl(15, ["history", "--json"])
     stdout: StdioCollector {
       waitForEnd: true
       onStreamFinished: root.loadHistory(text)
@@ -206,7 +212,7 @@ Item {
 
   Process {
     id: syncHistoryProcess
-    command: [root.cli, "history", "sync"]
+    command: root.ctl(120, ["history", "sync"])
     onExited: root.refreshHistory()
   }
 

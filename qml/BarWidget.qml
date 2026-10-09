@@ -352,7 +352,7 @@ Panel {
           bordered: true
           onClicked: {
             // The same switch as Omarchy's Bluetooth panel (an rfkill soft block).
-            Quickshell.execDetached(["rfkill", "unblock", "bluetooth"])
+            Quickshell.execDetached(["timeout", "10", "rfkill", "unblock", "bluetooth"])
             reconnectLater.restart()
           }
         }
@@ -472,6 +472,7 @@ Panel {
             implicitHeight: volumeSlider.implicitHeight
 
             Text {
+              textFormat: Text.PlainText
               id: volumeIcon
               anchors.left: parent.left
               anchors.verticalCenter: parent.verticalCenter
@@ -1212,6 +1213,7 @@ Panel {
       spacing: Style.space(8)
 
       Text {
+        textFormat: Text.PlainText
         text: person.icon
         color: person.alert ? root.urgent : (person.highlight ? root.accent : root.dim)
         font.family: root.fontFamily

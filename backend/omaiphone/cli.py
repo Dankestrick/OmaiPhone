@@ -26,6 +26,14 @@ SETTINGS = {
 }
 
 LAST_NUMBER_FILE = os.path.join(audio.STATE_DIR, "last-number")
+
+# The shell keeps everything a --json command prints, so output is capped here.
+MAX_JSON_BYTES = 1024 * 1024
+CONTACTS_MAX = 5000
+CONTACT_NUMBERS_MAX = 8
+HISTORY_MAX = 500
+TEXT_MAX = 200
+ERROR_MAX = 400
 ANSWERABLE = ("incoming", "waiting")
 ENDABLE = ("dialing", "alerting", "active", "held", "incoming", "waiting")
 
@@ -36,6 +44,18 @@ class UserError(Exception):
 
 def log(message):
     print(message, file=sys.stderr, flush=True)
+
+
+def emit_json(value, fallback):
+    """Print value as one JSON line, or fallback when it would pass MAX_JSON_BYTES."""
+    text = json.dumps(value)
+    if len(text.encode()) > MAX_JSON_BYTES:
+        text = json.dumps(fallback)
+    print(text, flush=True)
+
+
+def _clip(value, limit=TEXT_MAX):
+    return str(value or "")[:limit]
 
 
 # ---- status ---------------------------------------------------------------------
@@ -202,7 +222,7 @@ def find_call(calls, states):
 def cmd_status(args):
     status = collect_status(mask_numbers=args.mask)
     if args.json:
-        print(json.dumps(status))
+        emit_json(status, {"errors": ["status too large"]})
     else:
         print_status(status)
 
@@ -253,9 +273,7 @@ def cmd_call(args):
     tel = Telephony()
     tel.set_reject_sco(False)  # this call belongs to the PC: accept its audio
     tel.dial(number)
-    os.makedirs(audio.STATE_DIR, exist_ok=True)
-    with open(LAST_NUMBER_FILE, "w") as handle:
-        handle.write(number)
+    audio.write_private(LAST_NUMBER_FILE, number)
     print(f"Dialing {number} ...")
 
 
@@ -460,7 +478,10 @@ def cmd_contacts(args):
     elif args.action == "list":
         entries = contacts.load_contacts()
         if args.json:
-            print(json.dumps(entries))
+            trimmed = [{"name": _clip(c.get("name")),
+                        "numbers": [_clip(n, 40) for n in c.get("numbers", [])[:CONTACT_NUMBERS_MAX]]}
+                       for c in entries[:CONTACTS_MAX]]
+            emit_json(trimmed, [])
         else:
             for c in entries:
                 print(f"{c['name']}: {', '.join(c['numbers'])}")
@@ -493,7 +514,8 @@ def cmd_history(args):
         return
     data = contacts.merged_history()
     if args.json:
-        print(json.dumps({"entries": data["entries"], "unseenMissed": contacts.unseen_missed(data)}))
+        emit_json({"entries": data["entries"][:HISTORY_MAX], "unseenMissed": contacts.unseen_missed(data)},
+                  {"entries": [], "unseenMissed": 0})
         return
     labels = {"missed": "missed  ", "received": "incoming", "dialed": "outgoing"}
     for e in data["entries"]:
@@ -585,7 +607,7 @@ def cmd_watch(args):
 
     def emit():
         pending["id"] = 0
-        print(json.dumps(collect_status(mask_numbers=args.mask)), flush=True)
+        emit_json(collect_status(mask_numbers=args.mask), {"errors": ["status too large"]})
         return False
 
     def schedule(*_):
@@ -772,7 +794,7 @@ def main(argv=None):
         args.func(args)
     except (UserError, phone.InvalidNumber, bluez.BluetoothError, TelephonyError, control.ControlError,
             RuntimeError) as error:
-        print(f"omaiphone: {error}", file=sys.stderr)
+        print(f"omaiphone: {_clip(error, ERROR_MAX)}", file=sys.stderr)
         if args.command in ACTIONS:
             journal(f"action {args.command} failed: {error}")
         return 1

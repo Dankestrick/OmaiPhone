@@ -15,6 +15,7 @@ be restored if anything changed them during the call.
 import json
 import os
 import subprocess
+import tempfile
 
 STATE_DIR = os.path.join(os.environ.get("XDG_STATE_HOME", os.path.expanduser("~/.local/state")), "omaiphone")
 STATE_FILE = os.path.join(STATE_DIR, "audio.json")
@@ -37,10 +38,27 @@ def load_config(path=CONFIG_FILE):
         return {}
 
 
+def write_private(path, text):
+    """Replace path atomically with text, readable by the user only.
+    The temporary file has an unpredictable name in the same folder."""
+    folder = os.path.dirname(path)
+    os.makedirs(folder, mode=0o700, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", dir=folder)
+    try:
+        os.fchmod(fd, 0o600)
+        with os.fdopen(fd, "w") as handle:
+            handle.write(text)
+        os.replace(tmp, path)
+    except BaseException:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+        raise
+
+
 def save_config(config, path=CONFIG_FILE):
-    os.makedirs(os.path.dirname(path), exist_ok=True)
-    with open(path, "w") as handle:
-        json.dump(config, handle, indent=2)
+    write_private(path, json.dumps(config, indent=2))
 
 
 def noise_suppression_enabled(path=CONFIG_FILE):
@@ -75,11 +93,7 @@ class AudioRouter:
             return None
 
     def save_state(self, state):
-        os.makedirs(os.path.dirname(self.state_file), exist_ok=True)
-        tmp = self.state_file + ".tmp"
-        with open(tmp, "w") as handle:
-            json.dump(state, handle)
-        os.replace(tmp, self.state_file)
+        write_private(self.state_file, json.dumps(state))
 
     def clear_state(self):
         try:

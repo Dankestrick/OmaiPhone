@@ -10,6 +10,8 @@ import re
 
 from gi.repository import Gio, GLib
 
+from .audio import write_private
+
 OBEX = "org.bluez.obex"
 OBEX_PATH = "/org/bluez/obex"
 CLIENT_IFACE = "org.bluez.obex.Client1"
@@ -126,15 +128,10 @@ def build_index(contacts):
 # ---- cache -----------------------------------------------------------------------------------
 
 def save_cache(contacts, path=CACHE_FILE):
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    tmp = path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        entries = sorted(({"name": c["name"], "numbers": c["numbers"], "emails": c.get("emails", [])}
-                          for c in contacts),
-                         key=lambda c: c["name"].casefold())
-        json.dump({"index": build_index(contacts), "count": len(contacts), "contacts": entries}, handle)
-    os.replace(tmp, path)
+    entries = sorted(({"name": c["name"], "numbers": c["numbers"], "emails": c.get("emails", [])}
+                      for c in contacts),
+                     key=lambda c: c["name"].casefold())
+    write_private(path, json.dumps({"index": build_index(contacts), "count": len(contacts), "contacts": entries}))
 
 
 def cache_info(path=CACHE_FILE):
@@ -266,12 +263,7 @@ HISTORY_FILE = os.path.join(DATA_DIR, "history.json")
 
 
 def _write_private(path, data):
-    os.makedirs(os.path.dirname(path), mode=0o700, exist_ok=True)
-    tmp = path + ".tmp"
-    fd = os.open(tmp, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(fd, "w") as handle:
-        json.dump(data, handle)
-    os.replace(tmp, path)
+    write_private(path, json.dumps(data))
 
 
 def load_history(path=HISTORY_FILE):

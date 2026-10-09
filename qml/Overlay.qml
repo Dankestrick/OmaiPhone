@@ -1072,6 +1072,7 @@ Item {
             spacing: 0
 
             Text {
+              textFormat: Text.PlainText
               text: "j/k move"
               Layout.fillWidth: true
               color: root.muted
@@ -1079,6 +1080,7 @@ Item {
               font.pixelSize: Style.font.caption
             }
             Text {
+              textFormat: Text.PlainText
               text: "r reply"
               Layout.fillWidth: true
               horizontalAlignment: Text.AlignHCenter
@@ -1087,6 +1089,7 @@ Item {
               font.pixelSize: Style.font.caption
             }
             Text {
+              textFormat: Text.PlainText
               text: "n new"
               Layout.fillWidth: true
               horizontalAlignment: Text.AlignHCenter
@@ -1095,6 +1098,7 @@ Item {
               font.pixelSize: Style.font.caption
             }
             Text {
+              textFormat: Text.PlainText
               text: "ctrl+e emoji"
               Layout.fillWidth: true
               horizontalAlignment: Text.AlignHCenter
@@ -1103,6 +1107,7 @@ Item {
               font.pixelSize: Style.font.caption
             }
             Text {
+              textFormat: Text.PlainText
               text: "esc close"
               Layout.fillWidth: true
               horizontalAlignment: Text.AlignRight

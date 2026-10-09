@@ -16,6 +16,12 @@ from pathlib import Path
 
 from protocol import address_from_thread, present_message, thread_key
 
+# Every event line goes into the shell, so what one line can carry is capped.
+THREADS_MAX = 300
+MESSAGES_MAX = 500
+BODY_MAX = 4000
+LABEL_MAX = 200
+
 
 def _ensure_mode(path: Path, mode: int) -> None:
     """chmod only when needed. A chmod always fires an inotify event, and the
@@ -40,7 +46,8 @@ def shared_contacts_file() -> Path:
 
 def runtime_dir() -> Path:
     """Directory for short-lived files such as an outgoing bMessage."""
-    root = os.environ.get("XDG_RUNTIME_DIR") or str(Path("/tmp") / f"omaiphone-{os.getuid()}")
+    # Without a runtime dir, fall back to the private cache dir, never shared /tmp.
+    root = os.environ.get("XDG_RUNTIME_DIR") or os.environ.get("XDG_CACHE_HOME") or str(Path.home() / ".cache")
     path = Path(root) / "omaiphone"
     path.mkdir(parents=True, exist_ok=True)
     _ensure_mode(path, 0o700)
@@ -306,8 +313,8 @@ class Store:
         return {
             "id": row["id"],
             "thread": row["thread_key"],
-            "label": row["peer_label"],
-            "body": present_message(row["body"], bool(row["has_attachment"])),
+            "label": (row["peer_label"] or "")[:LABEL_MAX],
+            "body": present_message(row["body"], bool(row["has_attachment"]))[:BODY_MAX],
             "direction": row["direction"],
             "timestamp": row["timestamp"],
             "read": bool(row["read"]),
@@ -340,20 +347,23 @@ class Store:
             result.append(
                 {
                     "key": row["thread_key"],
-                    "label": row["peer_label"] or address_from_thread(row["thread_key"]) or "Unknown",
+                    "label": (row["peer_label"] or address_from_thread(row["thread_key"]) or "Unknown")[:LABEL_MAX],
                     "preview": preview[:80],
                     "unread": int(row["unread"]),
                     "timestamp": row["timestamp"],
                 }
             )
+            if len(result) >= THREADS_MAX:
+                break
         return result
 
     def messages_for(self, key: str) -> list[dict]:
         rows = self._db.execute(
-            "SELECT * FROM messages WHERE thread_key = ? ORDER BY timestamp ASC, id ASC",
-            (key,),
+            "SELECT * FROM messages WHERE thread_key = ? ORDER BY timestamp DESC, id DESC LIMIT ?",
+            (key, MESSAGES_MAX),
         ).fetchall()
-        return [self._public_message(row) for row in rows]
+        # The newest MESSAGES_MAX, oldest first.
+        return [self._public_message(row) for row in reversed(rows)]
 
     def record(self, external_id: str):
         """Internal row for one MAP handle. Used when filling in a full body."""

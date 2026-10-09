@@ -8,7 +8,7 @@ so that the panel and the CLI can show them. They are never logged.
 import json
 import os
 
-from .audio import STATE_DIR
+from .audio import STATE_DIR, write_private
 
 LIMIT = 60
 
@@ -90,13 +90,7 @@ def snapshot(enabled, state="off", detail="", store=None, media=None, battery=No
 
 def write_state(data, path=STATE_FILE):
     """Atomically, and readable by the user only."""
-    directory = os.path.dirname(path)
-    os.makedirs(directory, mode=0o700, exist_ok=True)
-    temporary = path + ".tmp"
-    descriptor = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
-    with os.fdopen(descriptor, "w") as handle:
-        json.dump(data, handle)
-    os.replace(temporary, path)
+    write_private(path, json.dumps(data))
 
 
 def read_state(path=STATE_FILE):
