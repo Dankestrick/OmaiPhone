@@ -15,6 +15,10 @@ from gi.repository import GLib
 
 from .att import PSM, AttClient
 
+# One GLib wake must return. A phone that keeps the socket readable would
+# otherwise run this callback until the socket goes quiet.
+PACKETS_PER_WAKE = 32
+
 
 def open_channel(address):
     """Start connecting to the phone's ATT channel; the socket is non-blocking."""
@@ -95,7 +99,9 @@ class RawAtt:
         return False
 
     def _readable(self, _fd, condition):
-        while not self._closed:
+        for _ in range(PACKETS_PER_WAKE):
+            if self._closed:
+                break
             try:
                 packet = self.sock.recv(4096)
             except BlockingIOError:
@@ -111,6 +117,9 @@ class RawAtt:
                 self.on_lost("the iPhone closed the data channel")
                 return False
             self.att.feed(packet)
+        else:
+            # The phone still had data after this wake's share. Stay subscribed.
+            return True
         if self._closed:
             self._watch = 0
             return False

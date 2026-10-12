@@ -12,7 +12,7 @@ does not notice the difference.
 
 from gi.repository import Gio, GLib
 
-from .att import ERR_ATTRIBUTE_NOT_FOUND, ERR_INSUFFICIENT_AUTHORIZATION, AttError
+from .att import ERR_ATTRIBUTE_NOT_FOUND, ERR_INSUFFICIENT_AUTHORIZATION, AttError, bounded_value
 
 BLUEZ = "org.bluez"
 SERVICE_IFACE = "org.bluez.GattService1"
@@ -139,9 +139,12 @@ class BluezGatt:
     def read(self, handle, on_done):
         def reply(bus, result):
             try:
-                value = bytes(bus.call_finish(result).unpack()[0])
+                raw = bus.call_finish(result).unpack()[0]
             except GLib.Error as error:
                 return on_done(None, _error(error))
+            value = bounded_value(raw)
+            if value is None:
+                return on_done(None, AttError(0))
             on_done(value, None)
 
         self.bus.call(BLUEZ, handle, CHAR_IFACE, "ReadValue", GLib.Variant("(a{sv})", ({},)),
@@ -165,13 +168,19 @@ class BluezGatt:
 
     # ---- notifications ---------------------------------------------------------------
 
+    def _deliver(self, path, value):
+        blob = bounded_value(value)
+        if blob is None:
+            return
+        self.on_notify(path, blob)
+
     def _listen(self, path):
         def changed(_conn, _sender, object_path, _iface, _member, params, _data):
             if self._closed:
                 return
             interface, props, _invalid = params.unpack()
             if interface == CHAR_IFACE and "Value" in props:
-                self.on_notify(object_path, bytes(props["Value"]))
+                self._deliver(object_path, props["Value"])
 
         self._subscriptions.append(self.bus.signal_subscribe(
             BLUEZ, PROPS_IFACE, "PropertiesChanged", path, None, Gio.DBusSignalFlags.NONE, changed, None))

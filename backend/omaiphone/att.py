@@ -41,6 +41,10 @@ ERR_INSUFFICIENT_AUTHORIZATION = 0x08
 ERR_ATTRIBUTE_NOT_FOUND = 0x0A
 ERR_INSUFFICIENT_ENCRYPTION = 0x0F
 
+# One notification or read value. ANCS attributes are a few hundred bytes;
+# anything larger is dropped before it is copied into a callback.
+MAX_VALUE_BYTES = 4096
+
 ERROR_NAMES = {
     ERR_READ_NOT_PERMITTED: "read not permitted",
     ERR_WRITE_NOT_PERMITTED: "write not permitted",
@@ -120,6 +124,24 @@ def write_request(handle, value):
 
 def error_response(opcode, handle, code):
     return struct.pack("<BBHB", OP_ERROR, opcode, handle, code)
+
+
+def bounded_value(value, limit=MAX_VALUE_BYTES):
+    """The bytes of a phone value, or None when it is not a short byte string.
+
+    Length is checked before the copy, so a multi-megabyte array is refused
+    without being duplicated.
+    """
+    try:
+        size = len(value)
+    except TypeError:
+        return None
+    if size > limit:
+        return None
+    try:
+        return bytes(value)
+    except (TypeError, ValueError):
+        return None
 
 
 def _next_handle(start, cursor):
@@ -219,7 +241,7 @@ class AttClient:
         if opcode in (OP_NOTIFY, OP_INDICATE):
             if opcode == OP_INDICATE:
                 self._send(bytes([OP_CONFIRM]))
-            if len(pdu) >= 3:
+            if len(pdu) >= 3 and len(pdu) - 3 <= MAX_VALUE_BYTES:
                 self.on_notify(struct.unpack_from("<H", pdu, 1)[0], bytes(pdu[3:]))
         elif is_response(opcode):
             self._response(pdu)

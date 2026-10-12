@@ -2,6 +2,7 @@ import os
 import struct
 import sys
 import unittest
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -154,6 +155,65 @@ class AttClientTests(unittest.TestCase):
         client.fail_pending(att.AttError(0))
         self.assertEqual(len(answers), 3)
         self.assertFalse(client.busy)
+
+    def test_oversized_notification_is_not_delivered(self):
+        sent, got = [], []
+        client = att.AttClient(sent.append, lambda handle, value: got.append(value))
+        client.feed(struct.pack("<BH", att.OP_NOTIFY, 7) + b"x" * (att.MAX_VALUE_BYTES + 1))
+        client.feed(struct.pack("<BH", att.OP_INDICATE, 7) + b"ok")
+        self.assertEqual(got, [b"ok"])
+        self.assertEqual(sent, [bytes([att.OP_CONFIRM])])
+        self.assertIsNone(att.bounded_value(b"x" * (att.MAX_VALUE_BYTES + 1)))
+        self.assertEqual(att.bounded_value([1, 2]), b"\x01\x02")
+
+
+class GattAndRawTests(unittest.TestCase):
+    def test_gatt_drops_an_oversized_notification(self):
+        from omaiphone.gatt import BluezGatt
+        got = []
+        gatt = BluezGatt.__new__(BluezGatt)
+        gatt.on_notify = lambda path, value: got.append((path, value))
+        gatt._deliver("/char", b"hi")
+        gatt._deliver("/char", bytearray(att.MAX_VALUE_BYTES + 1))
+        self.assertEqual(got, [("/char", b"hi")])
+
+    def test_one_wake_reads_a_fixed_number_of_packets(self):
+        from omaiphone.rawatt import PACKETS_PER_WAKE, RawAtt
+        fed = []
+
+        class Sock:
+            def __init__(self):
+                self.left = PACKETS_PER_WAKE + 10
+
+            def recv(self, _n):
+                if self.left <= 0:
+                    raise BlockingIOError
+                self.left -= 1
+                return b"\x1b\x01\x00ok"
+
+            def close(self):
+                pass
+
+        raw = RawAtt.__new__(RawAtt)
+        raw._closed = False
+        raw._watch = 0
+        raw.sock = Sock()
+        raw.att = SimpleNamespace(feed=fed.append)
+        raw.on_lost = lambda _message: None
+        self.assertTrue(raw._readable(0, 0))
+        self.assertEqual(len(fed), PACKETS_PER_WAKE)
+        self.assertEqual(raw.sock.left, 10)
+        self.assertTrue(raw._readable(0, 0))
+        self.assertEqual(len(fed), PACKETS_PER_WAKE + 10)
+        self.assertTrue(raw._readable(0, 0))
+        self.assertFalse(raw._closed)
+
+        raw.sock = SimpleNamespace(recv=lambda _n: b"", close=lambda: None)
+        lost = []
+        raw.on_lost = lost.append
+        self.assertFalse(raw._readable(0, 0))
+        self.assertTrue(raw._closed)
+        self.assertEqual(lost, ["the iPhone closed the data channel"])
 
 
 class AncsCodecTests(unittest.TestCase):
