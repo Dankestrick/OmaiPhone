@@ -49,5 +49,24 @@ class PublicErrorTests(unittest.TestCase):
         )
 
 
+class NewTextPopupTests(unittest.TestCase):
+    def test_a_new_text_starts_a_popup(self):
+        # Regression: a helper in messagesd once shadowed protocol.notification_title,
+        # so every new text raised before its pop-up was made.
+        from unittest import mock
+
+        class Store:
+            def settings(self):
+                return {"notifyBody": True}
+
+        started = []
+        with mock.patch.object(messagesd, "spawn", lambda coro: (started.append(coro), coro.close())), \
+                mock.patch.object(messagesd, "notify", lambda title, body: mock.MagicMock(close=lambda: None, title=title)):
+            emit = messagesd.notifying_emit(Store(), lambda event: None)
+            emit({"event": "message", "notify": True, "message": {"label": "Ada Lovelace", "body": "hi"}})
+        self.assertEqual(len(started), 1)
+        self.assertEqual(started[0].title, "Ada Lovelace")
+
+
 if __name__ == "__main__":
     unittest.main()

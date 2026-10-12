@@ -40,7 +40,7 @@ def emit(event: dict) -> None:
     sys.stdout.flush()
 
 
-def notification_title(value: str, limit: int) -> str:
+def _plain_title(value: str, limit: int) -> str:
     """One plain line for the title. Omarchy shows titles as plain text (tested),
     so escaping it would show "Tom &amp; Jerry"."""
     return " ".join(str(value or "").replace("\x00", "").split())[:limit]
@@ -69,7 +69,7 @@ def notification_text(value: str, limit: int, keep_newlines: bool = False) -> st
 
 def notification_argv(title: str, body: str) -> list[str]:
     """notify-send arguments. `--` keeps a hostile title from being an option."""
-    safe_title = notification_title(title, 80) or "New message"
+    safe_title = _plain_title(title, 80) or "New message"
     args = ["notify-send", "--app-name=Messages", "--urgency=normal", "--", safe_title]
     if body:
         args.append(notification_text(body, 120, keep_newlines=True))
