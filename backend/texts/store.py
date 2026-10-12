@@ -31,16 +31,34 @@ CONTACTS_MAX = 5000
 ROW_MAX = 2000
 
 
+# A hostile id longer than ID_MAX is hashed from this prefix only. Hashing
+# the whole multi-megabyte string would be the cost the phone was imposing.
+_HASH_PREFIX = 4096
+
+
+def _as_text(value) -> str:
+    """Phone fields are strings. Anything else is dropped, not stringified."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, int) and 0 <= value.bit_length() <= 64:
+        return str(value)
+    return ""
+
+
 def _bound_text(value: str, limit: int) -> str:
-    return str(value or "").replace("\x00", "")[:limit]
+    # Slice before stripping NULs so a multi-megabyte value is not copied whole.
+    return _as_text(value)[: limit + 16].replace("\x00", "")[:limit]
 
 
 def _bound_id(value: str) -> str:
     """Shorten an id the phone chose so it cannot be a huge database key."""
-    text = str(value or "").replace("\x00", "")
-    if 1 <= len(text) <= ID_MAX:
+    text = _as_text(value)
+    if 1 <= len(text) <= ID_MAX and "\x00" not in text:
         return text
-    digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:32]
+    prefix = text[:_HASH_PREFIX].replace("\x00", "")
+    digest = hashlib.sha256(f"{len(text)}:".encode() + prefix.encode("utf-8", "replace")).hexdigest()[:32]
     return "id-" + digest
 
 

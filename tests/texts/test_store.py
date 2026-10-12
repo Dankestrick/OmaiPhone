@@ -39,6 +39,15 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(messages[-1]["id"], created["id"])  # newest kept, oldest first
         self.assertTrue(all(len(m["body"]) <= store.BODY_MAX for m in messages))
 
+    def test_a_huge_id_is_shortened_from_a_prefix(self):
+        huge = "m" * (store._HASH_PREFIX + 100000)
+        first = store._bound_id(huge)
+        self.assertEqual(len(first), len("id-") + 32)
+        self.assertNotEqual(first, store._bound_id(huge + "more"))
+        self.assertEqual(store._bound_id("map-1"), "map-1")
+        self.assertEqual(store._bound_text("a\x00b" + "c" * 10000, 4), "abcc")
+        self.assertEqual(store._bound_text({"nope": "x"}, 10), "")
+
     def test_phone_fields_are_bounded_in_the_database(self):
         self.db.set_own_number("+15550001111")
         self.db.upsert_message(
