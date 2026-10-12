@@ -2,6 +2,7 @@ import os
 import struct
 import sys
 import unittest
+from types import SimpleNamespace
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 sys.path.insert(0, os.path.dirname(__file__))
@@ -155,6 +156,65 @@ class AttClientTests(unittest.TestCase):
         self.assertEqual(len(answers), 3)
         self.assertFalse(client.busy)
 
+    def test_oversized_notification_is_not_delivered(self):
+        sent, got = [], []
+        client = att.AttClient(sent.append, lambda handle, value: got.append(value))
+        client.feed(struct.pack("<BH", att.OP_NOTIFY, 7) + b"x" * (att.MAX_VALUE_BYTES + 1))
+        client.feed(struct.pack("<BH", att.OP_INDICATE, 7) + b"ok")
+        self.assertEqual(got, [b"ok"])
+        self.assertEqual(sent, [bytes([att.OP_CONFIRM])])
+        self.assertIsNone(att.bounded_value(b"x" * (att.MAX_VALUE_BYTES + 1)))
+        self.assertEqual(att.bounded_value([1, 2]), b"\x01\x02")
+
+
+class GattAndRawTests(unittest.TestCase):
+    def test_gatt_drops_an_oversized_notification(self):
+        from omaiphone.gatt import BluezGatt
+        got = []
+        gatt = BluezGatt.__new__(BluezGatt)
+        gatt.on_notify = lambda path, value: got.append((path, value))
+        gatt._deliver("/char", b"hi")
+        gatt._deliver("/char", bytearray(att.MAX_VALUE_BYTES + 1))
+        self.assertEqual(got, [("/char", b"hi")])
+
+    def test_one_wake_reads_a_fixed_number_of_packets(self):
+        from omaiphone.rawatt import PACKETS_PER_WAKE, RawAtt
+        fed = []
+
+        class Sock:
+            def __init__(self):
+                self.left = PACKETS_PER_WAKE + 10
+
+            def recv(self, _n):
+                if self.left <= 0:
+                    raise BlockingIOError
+                self.left -= 1
+                return b"\x1b\x01\x00ok"
+
+            def close(self):
+                pass
+
+        raw = RawAtt.__new__(RawAtt)
+        raw._closed = False
+        raw._watch = 0
+        raw.sock = Sock()
+        raw.att = SimpleNamespace(feed=fed.append)
+        raw.on_lost = lambda _message: None
+        self.assertTrue(raw._readable(0, 0))
+        self.assertEqual(len(fed), PACKETS_PER_WAKE)
+        self.assertEqual(raw.sock.left, 10)
+        self.assertTrue(raw._readable(0, 0))
+        self.assertEqual(len(fed), PACKETS_PER_WAKE + 10)
+        self.assertTrue(raw._readable(0, 0))
+        self.assertFalse(raw._closed)
+
+        raw.sock = SimpleNamespace(recv=lambda _n: b"", close=lambda: None)
+        lost = []
+        raw.on_lost = lost.append
+        self.assertFalse(raw._readable(0, 0))
+        self.assertTrue(raw._closed)
+        self.assertEqual(lost, ["the iPhone closed the data channel"])
+
 
 class AncsCodecTests(unittest.TestCase):
     def test_event(self):
@@ -207,6 +267,13 @@ class AncsCodecTests(unittest.TestCase):
         self.assertIsNone(ancs.parse_notification_attributes(pending, expected=1))
         with self.assertRaises(ancs.Rejected):
             ancs.parse_app_attributes(b"\x01" + b"a" * (ancs.MAX_APP_ID + 5))
+
+    def test_emoji_message_at_the_asked_length_is_kept(self):
+        # 400 characters asked for; 400 emoji are 1600 bytes in UTF-8.
+        text = ("\U0001F600" * 400).encode()
+        data = b"\x00" + struct.pack("<I", 1) + struct.pack("<BH", 3, len(text)) + text
+        result = ancs.parse_notification_attributes(data, expected=1)
+        self.assertIsNotNone(result)
 
 
 class SessionCapTests(unittest.TestCase):
@@ -398,6 +465,43 @@ class SessionTests(unittest.TestCase):
         phone.add(2)
         pump()                                                # the late details for 1 arrive before those for 2
         self.assertEqual([n["uid"] for n in recorder.notifications], [2])
+
+    def test_an_app_name_that_never_arrives_is_released(self):
+        from omaiphone.companion import COMMAND_TIMEOUT, Session
+        seen = []
+        now = {"t": 0.0}
+        session = Session(lambda _packet: None, on_notification=seen.append, clock=lambda: now["t"])
+        session.state = "ready"
+        app = "com.example.Evil"
+        session._waiting[app] = [{"uid": 1, "app": "", "title": "t"}]
+        session._current = ("app", app, now["t"] + COMMAND_TIMEOUT)
+        now["t"] += COMMAND_TIMEOUT + 1
+        self.assertTrue(session.tick())
+        self.assertEqual(session._waiting, {})
+        self.assertIsNone(session._current)
+        self.assertEqual([note["app"] for note in seen], ["Evil"])
+
+    def test_app_lookups_stop_when_the_queue_is_full(self):
+        from omaiphone.companion import MAX_QUEUED, MAX_TRACKED, Session
+        seen = []
+        session = Session(lambda _packet: None, on_notification=seen.append, clock=lambda: 0)
+        session.state = "ready"
+        session._current = ("attributes", 1, 100)
+        session._commands = [("attributes", i, b"x") for i in range(MAX_QUEUED)]
+        session._events[7] = {
+            "event": "added", "category": "other", "silent": False, "important": False,
+            "preexisting": False, "canDismiss": False,
+        }
+        session._notification_read(7, {ancs.ATTR_APP_ID: "com.example.New", ancs.ATTR_TITLE: "Hi"})
+        self.assertEqual(len(session._commands), MAX_QUEUED)
+        self.assertEqual(session._waiting, {})
+        self.assertEqual(seen[0]["app"], "New")
+
+        session._waiting["com.example.App"] = [{"uid": i} for i in range(MAX_TRACKED)]
+        session._events[8] = dict(session._events[7])
+        session._notification_read(8, {ancs.ATTR_APP_ID: "com.example.App", ancs.ATTR_TITLE: "x"})
+        self.assertEqual(len(session._waiting["com.example.App"]), MAX_TRACKED)
+        self.assertEqual(seen[-1]["uid"], 8)
 
 
 if __name__ == "__main__":

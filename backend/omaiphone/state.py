@@ -48,10 +48,14 @@ class InvalidTransition(Exception):
 
 
 def from_pipewire(value):
+    """Map a PipeWire call state. The error text never repeats the phone's value."""
+    if not isinstance(value, str):
+        raise ValueError("unknown call state")
+    text = " ".join(value.replace("\x00", "")[:32].split()).lower()
     try:
-        return PIPEWIRE_STATES[str(value).lower()]
+        return PIPEWIRE_STATES[text]
     except KeyError:
-        raise ValueError(f"unknown call state: {value!r}")
+        raise ValueError("unknown call state")
 
 
 class CallStateMachine:

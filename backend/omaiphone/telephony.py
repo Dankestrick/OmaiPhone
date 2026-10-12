@@ -74,10 +74,10 @@ class Telephony:
             props = ifaces[CALL_IFACE]
             result.append({
                 "path": path,
-                "state": props.get("State", ""),
-                "number": props.get("LineIdentification", ""),
-                "name": props.get("Name", ""),
-                "incoming": props.get("IncomingLine", ""),
+                "state": events.clip_text(props.get("State", ""), events.STATE_MAX),
+                "number": events.clip_text(props.get("LineIdentification", ""), events.CALLER_MAX),
+                "name": events.clip_text(props.get("Name", ""), events.CALLER_MAX),
+                "incoming": events.clip_text(props.get("IncomingLine", ""), events.CALLER_MAX),
                 "multiparty": bool(props.get("Multiparty")),
             })
         return result
@@ -159,7 +159,7 @@ class Telephony:
         for path, ifaces in objs.items():
             if TRANSPORT_IFACE in ifaces and (path == ag_path or path.startswith(ag_path + "/")):
                 props = ifaces[TRANSPORT_IFACE]
-                return {"path": path, "state": props.get("State", ""),
+                return {"path": path, "state": events.clip_text(props.get("State", ""), events.STATE_MAX),
                         "codec": events.codec_name(props.get("Codec")),
                         "wideband": events.is_wideband(props.get("Codec"))}
         return None

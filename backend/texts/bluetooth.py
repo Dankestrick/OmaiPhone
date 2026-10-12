@@ -49,8 +49,15 @@ _MAX_DOWNLOAD_TRIES = 3
 _MAX_TRACKED_HANDLES = 500
 # A text is a few kilobytes. Anything larger is not stored or parsed.
 _MAX_BMESSAGE_BYTES = 128 * 1024
-# MAP handles are hex, at most 16 digits. Anything else must not become a path.
-_HANDLE_TOKEN = re.compile(r"^[0-9A-Fa-f]{1,16}$")
+# MAP handles are hex digits. Real iPhones send 18-19 of them, longer than the
+# spec's 16, so allow 32. Anything else must not become a path.
+_HANDLE_MAX = 32
+_HANDLE_TOKEN = re.compile(r"^[0-9A-Fa-f]{1,32}$")
+# ListMessages is asked for 40. A phone that ignores that must not make us
+# download the whole inbox or keep every row.
+_MAX_LISTING = 40
+# BlueZ object paths are short. A longer "path" is not remembered.
+_MAX_OBJECT_PATH = 240
 # The shared phone book is written by us, but only after a download. Refuse
 # to parse a file that has grown past the download cap.
 _MAX_CONTACTS_FILE = 2 * 1024 * 1024
@@ -73,16 +80,40 @@ def _props_of(interfaces: dict, name: str) -> dict:
     return {key: _unwrap(val) for key, val in raw.items()}
 
 
+def _handle_token(value) -> str:
+    """A MAP handle, or "" when the phone's value is not a short hex token.
+
+    The token is used as a file name and a database key. A long string is
+    rejected before it is copied or hashed.
+    """
+    if isinstance(value, bool) or value is None:
+        return ""
+    if isinstance(value, int):
+        if value < 0 or value.bit_length() > 64:
+            return ""
+        text = str(value)
+    elif isinstance(value, str):
+        text = value
+    else:
+        return ""
+    if len(text) > _HANDLE_MAX or not _HANDLE_TOKEN.fullmatch(text):
+        return ""
+    return text
+
+
 def _handle_from(path: str, fields: dict) -> str:
     """MAP handle for one text.
 
     BlueZ puts the handle in the object name, like .../message42.
-    The property list often does not include it.
+    The property list often does not include it. A Handle property that is
+    not a short hex token is ignored, so it cannot replace the object name.
     """
-    handle = fields.get("Handle")
-    if handle not in (None, ""):
-        return str(handle)
-    match = re.search(r"message(\d+)$", path or "")
+    handle = _handle_token(fields.get("Handle"))
+    if handle:
+        return handle
+    if not isinstance(path, str):
+        return ""
+    match = re.search(r"message([0-9A-Fa-f]{1,32})$", path[-80:])
     return match.group(1) if match else ""
 
 
@@ -93,16 +124,25 @@ def _listing_entries(listing) -> list[tuple[str, dict]]:
     hands that back as pairs, not as a flat property bag.
     """
     if isinstance(listing, dict):
-        pairs = list(listing.items())
+        pairs = listing.items()
     else:
-        pairs = list(listing or [])
+        pairs = listing or []
     rows = []
     for entry in pairs:
+        if len(rows) >= _MAX_LISTING:
+            break
         if isinstance(entry, (list, tuple)) and len(entry) == 2 and isinstance(entry[1], dict):
             path, props = entry
-            rows.append((str(path), {key: _unwrap(val) for key, val in props.items()}))
+            if not isinstance(path, str):
+                continue
+            if len(path) > _MAX_OBJECT_PATH:
+                continue
+            rows.append((path, {key: _unwrap(val) for key, val in props.items()}))
         elif isinstance(entry, dict):
-            rows.append((str(entry.get("Path") or ""), {key: _unwrap(val) for key, val in entry.items()}))
+            path = entry.get("Path") or ""
+            if not isinstance(path, str) or len(path) > _MAX_OBJECT_PATH:
+                continue
+            rows.append((path, {key: _unwrap(val) for key, val in entry.items()}))
     return rows
 
 
@@ -139,7 +179,9 @@ def read_bounded_text(path: Path, limit: int = _MAX_BMESSAGE_BYTES) -> str:
 
 def _map_time(value: str) -> str:
     """MAP timestamps look like 20261002T103000. Store a sortable ISO string."""
-    digits = re.sub(r"\D", "", value or "")
+    if not isinstance(value, str):
+        return Store.now_stamp()
+    digits = re.sub(r"\D", "", value[:32])
     if len(digits) < 14:
         return Store.now_stamp()
     return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}T{digits[8:10]}:{digits[10:12]}:{digits[12:14]}"
@@ -719,11 +761,15 @@ class BluetoothSession:
         if not self._session_bus or not self._map_path:
             return 0
         saved = 0
+        seen = 0
         objects = await self._managed("org.bluez.obex", "/", self._session_bus)
         prefix = self._map_path + "/message"
         for path, interfaces in objects.items():
+            if seen >= _MAX_LISTING:
+                break
             if not str(path).startswith(prefix):
                 continue
+            seen += 1
             props = _props_of(interfaces, "org.bluez.obex.Message1")
             if not props:
                 continue
@@ -816,7 +862,9 @@ class BluetoothSession:
 
     def _remember_handle(self, handle: str, path: str) -> None:
         """Keep the obex object path for a handle, dropping the oldest when full."""
-        if not handle or not path:
+        if not _handle_token(handle):
+            return
+        if not isinstance(path, str) or len(path) > _MAX_OBJECT_PATH or "\x00" in path:
             return
         self._message_paths[handle] = path
         while len(self._message_paths) > _MAX_TRACKED_HANDLES:
