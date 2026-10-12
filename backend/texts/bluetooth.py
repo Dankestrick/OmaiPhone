@@ -49,8 +49,10 @@ _MAX_DOWNLOAD_TRIES = 3
 _MAX_TRACKED_HANDLES = 500
 # A text is a few kilobytes. Anything larger is not stored or parsed.
 _MAX_BMESSAGE_BYTES = 128 * 1024
-# MAP handles are hex, at most 16 digits. Anything else must not become a path.
-_HANDLE_TOKEN = re.compile(r"^[0-9A-Fa-f]{1,16}$")
+# MAP handles are hex digits. Real iPhones send 18-19 of them, longer than the
+# spec's 16, so allow 32. Anything else must not become a path.
+_HANDLE_MAX = 32
+_HANDLE_TOKEN = re.compile(r"^[0-9A-Fa-f]{1,32}$")
 # ListMessages is asked for 40. A phone that ignores that must not make us
 # download the whole inbox or keep every row.
 _MAX_LISTING = 40
@@ -94,7 +96,7 @@ def _handle_token(value) -> str:
         text = value
     else:
         return ""
-    if len(text) > 16 or not _HANDLE_TOKEN.fullmatch(text):
+    if len(text) > _HANDLE_MAX or not _HANDLE_TOKEN.fullmatch(text):
         return ""
     return text
 
@@ -111,7 +113,7 @@ def _handle_from(path: str, fields: dict) -> str:
         return handle
     if not isinstance(path, str):
         return ""
-    match = re.search(r"message([0-9A-Fa-f]{1,16})$", path[-80:])
+    match = re.search(r"message([0-9A-Fa-f]{1,32})$", path[-80:])
     return match.group(1) if match else ""
 
 

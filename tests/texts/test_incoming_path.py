@@ -21,13 +21,21 @@ class IncomingPathTests(unittest.TestCase):
             "..",
             "/etc/cron.d/pwn",
             "incoming-../../../../../../tmp/pwn",
-            "A" * 17,
+            "A" * 33,
             "msg 1",
             "0000/0001",
             "",
             "....//",
         ):
             self.assertIsNone(bluetooth.incoming_bmessage_path(root, handle), handle)
+
+    def test_real_iphone_handles_are_accepted(self):
+        # Shapes seen from a real iPhone: 18 and 19 hex digits (longer than the MAP spec's 16).
+        root = Path("/run/user/1000/omaiphone")
+        for handle in ("1" * 18, "2" * 19):
+            self.assertEqual(bluetooth.incoming_bmessage_path(root, handle), root / f"incoming-{handle}.bmsg")
+            self.assertEqual(bluetooth._handle_from(f"/org/bluez/obex/s/message{handle}", {"Handle": handle}), handle)
+            self.assertEqual(bluetooth._handle_from(f"/org/bluez/obex/s/message{handle}", {}), handle)
 
     def test_a_hostile_handle_or_listing_does_not_grow(self):
         huge = "H" * 100000
