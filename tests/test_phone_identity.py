@@ -102,5 +102,18 @@ class DaemonPhoneFilterTests(unittest.TestCase):
         daemon._adopt.assert_called_once()
 
 
+class PrivateFolderTests(unittest.TestCase):
+    def test_old_open_folder_is_closed_on_write(self):
+        import tempfile
+        from omaiphone import audio
+        with tempfile.TemporaryDirectory() as tmp:
+            folder = os.path.join(tmp, "state")
+            os.mkdir(folder, 0o755)
+            os.chmod(folder, 0o755)
+            audio.write_private(os.path.join(folder, "last-number"), "+15551234567")
+            self.assertEqual(os.stat(folder).st_mode & 0o777, 0o700)
+            self.assertEqual(os.stat(os.path.join(folder, "last-number")).st_mode & 0o777, 0o600)
+
+
 if __name__ == "__main__":
     unittest.main()

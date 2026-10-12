@@ -43,6 +43,10 @@ def write_private(path, text):
     The temporary file has an unpredictable name in the same folder."""
     folder = os.path.dirname(path)
     os.makedirs(folder, mode=0o700, exist_ok=True)
+    # Folders from older versions were made 0755. chmod only when wrong: every
+    # chmod is a file event that watchers react to.
+    if os.stat(folder).st_mode & 0o777 != 0o700:
+        os.chmod(folder, 0o700)
     fd, tmp = tempfile.mkstemp(prefix="." + os.path.basename(path) + ".", dir=folder)
     try:
         os.fchmod(fd, 0o600)
