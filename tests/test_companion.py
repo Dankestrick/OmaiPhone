@@ -268,6 +268,13 @@ class AncsCodecTests(unittest.TestCase):
         with self.assertRaises(ancs.Rejected):
             ancs.parse_app_attributes(b"\x01" + b"a" * (ancs.MAX_APP_ID + 5))
 
+    def test_emoji_message_at_the_asked_length_is_kept(self):
+        # 400 characters asked for; 400 emoji are 1600 bytes in UTF-8.
+        text = ("\U0001F600" * 400).encode()
+        data = b"\x00" + struct.pack("<I", 1) + struct.pack("<BH", 3, len(text)) + text
+        result = ancs.parse_notification_attributes(data, expected=1)
+        self.assertIsNotNone(result)
+
 
 class SessionCapTests(unittest.TestCase):
     def test_hostile_attribute_ends_the_command(self):

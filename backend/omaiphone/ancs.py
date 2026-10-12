@@ -38,7 +38,9 @@ NOTIFICATION_ATTRIBUTES = ((ATTR_APP_ID, None), (ATTR_TITLE, 96), (ATTR_SUBTITLE
 
 # The phone is supposed to honour the maximum above. A hostile one can set the
 # 16-bit length to 65535. Anything past this is rejected instead of buffered.
-MAX_VALUE_BYTES = 512
+# The maximum may count characters, and an emoji is 4 bytes in UTF-8, so a
+# real 400-character message can be 1600 bytes.
+MAX_VALUE_BYTES = 4 * max(limit or 0 for _attribute, limit in NOTIFICATION_ATTRIBUTES)
 MAX_APP_ID = 128
 MAX_MEDIA_CHARS = 200
 # Header plus every attribute at the cap, with room for the app-id string.
