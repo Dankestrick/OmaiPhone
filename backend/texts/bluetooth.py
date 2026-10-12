@@ -147,6 +147,16 @@ class PairAgent(ServiceInterface):
         super().__init__("org.bluez.Agent1")
         self._on_code = on_code
         self._pending: asyncio.Future | None = None
+        # Object path of the phone being paired. Requests from any other
+        # device during the pairing window are rejected.
+        self.expected: str | None = None
+
+    def expect(self, device_path: str | None) -> None:
+        self.expected = device_path
+
+    def _check_device(self, device: str) -> None:
+        if not self.expected or device != self.expected:
+            raise DBusError("org.bluez.Error.Rejected", "not the phone being paired")
 
     def answer(self, accept: bool) -> None:
         pending = self._pending
@@ -191,6 +201,7 @@ class PairAgent(ServiceInterface):
 
     @method()
     async def RequestConfirmation(self, device: "o", passkey: "u"):
+        self._check_device(device)
         try:
             await asyncio.wait_for(self._begin_wait(f"{int(passkey):06d}"), timeout=90)
         except asyncio.TimeoutError as exc:
@@ -198,18 +209,17 @@ class PairAgent(ServiceInterface):
 
     @method()
     async def RequestAuthorization(self, device: "o"):
-        try:
-            await asyncio.wait_for(self._begin_wait("YES"), timeout=90)
-        except asyncio.TimeoutError as exc:
-            raise DBusError("org.bluez.Error.Rejected", "timed out") from exc
+        # "Just Works" pairing has no code to compare, so anyone nearby could
+        # pose as the phone. iPhones always pair with a code.
+        raise DBusError("org.bluez.Error.Rejected", "numeric comparison only")
 
     @method()
     def AuthorizeService(self, device: "o", uuid: "s"):
         # Registered only while the user is pairing. MAP and PBAP are the
         # profiles this plugin uses. Rejecting unknown UUIDs here would also
         # reject the phone's own handshake, so the user's confirmation above
-        # is the gate.
-        return
+        # is the gate, and only the phone being paired gets through.
+        self._check_device(device)
 
     def _reject_if_waiting(self):
         self.answer(False)
@@ -347,12 +357,13 @@ class BluetoothSession:
         if self._agent:
             self._agent.answer(accept)
 
-    async def _adopt_paired_iphone(self) -> None:
-        """Remember an iPhone that BlueZ already has paired, and tell the overlay."""
+    async def _adopt_paired_iphone(self) -> bool:
+        """Remember an iPhone that BlueZ already has paired, and tell the overlay.
+        Returns whether any phone was found, paired or not."""
         devices = await self._phone_dicts()
         self.emit({"event": "devices", "devices": devices})
         if not devices:
-            return
+            return False
         saved = self.store.settings()["phoneAddress"].upper()
         chosen = None
         for device in devices:
@@ -360,16 +371,18 @@ class BluetoothSession:
                 chosen = device
                 break
         if chosen is None:
-            for device in devices:
-                if device.get("connected"):
-                    chosen = device
-                    break
-            chosen = chosen or devices[0]
+            # Only a phone this PC has paired with can be saved. A nearby
+            # stranger's phone shows up in a scan too, and a name is easy to fake.
+            paired = [device for device in devices if device.get("paired")]
+            if not paired:
+                return True
+            chosen = next((device for device in paired if device.get("connected")), paired[0])
             self.store.set_phone(chosen["address"], chosen["name"] or "iPhone")
         # "connected" is reserved for a live message session. A Bluetooth
         # link alone means the phone is nearby and can be opened.
         self.state = "phone_nearby"
         self.detail = "iPhone is paired."
+        return True
 
     async def scan(self) -> None:
         async with self.lock:
@@ -396,10 +409,10 @@ class BluetoothSession:
                     await adapter.call_stop_discovery()
                 except DBusError:
                     pass
-                await self._adopt_paired_iphone()
+                found = await self._adopt_paired_iphone()
                 if not self.store.settings()["phoneAddress"]:
                     self.state = "not_paired"
-                    self.detail = "No phone found. Move it closer and scan again."
+                    self.detail = "Select your iPhone to pair it." if found else "No phone found. Move it closer and scan again."
                 else:
                     self.detail = "Select your iPhone."
             except Exception as exc:
@@ -416,8 +429,10 @@ class BluetoothSession:
             # message and contact switches. Restored after this attempt.
             self._class_changed = _set_adapter_class(4, 8)
             try:
-                await self._register_agent()
                 device = await self._device(address)
+                if self._agent:
+                    self._agent.expect(device.path)
+                await self._register_agent()
                 name = await self._device_name(device)
                 try:
                     if explicit:
@@ -433,6 +448,10 @@ class BluetoothSession:
                     self.emit({"event": "error", "message": public_error(exc)})
                     self.push_status()
                     return
+                if not await device.get_paired():
+                    # A connection alone proves nothing about who is on the
+                    # other end; only a confirmed pairing saves the phone.
+                    raise RuntimeError("The phone connected but did not pair. Try again and confirm the code.")
                 try:
                     await device.set_trusted(True)
                 except Exception:
@@ -450,6 +469,8 @@ class BluetoothSession:
                 self.push_status()
             finally:
                 await self._unregister_agent()
+                if self._agent:
+                    self._agent.expect(None)
                 self._restore_class_later()
 
     def _restore_class_later(self) -> None:
