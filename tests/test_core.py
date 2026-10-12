@@ -86,8 +86,14 @@ class StateMachineTests(unittest.TestCase):
     def test_pipewire_mapping(self):
         self.assertEqual(from_pipewire("waiting"), CallState.INCOMING)
         self.assertEqual(from_pipewire("ALERTING"), CallState.ALERTING)
-        with self.assertRaises(ValueError):
+        with self.assertRaises(ValueError) as caught:
             from_pipewire("ringing-ish")
+        self.assertNotIn("ringing-ish", str(caught.exception))
+        blob = ("<" + "X" * 100000)
+        with self.assertRaises(ValueError) as caught:
+            from_pipewire(blob)
+        self.assertEqual(str(caught.exception), "unknown call state")
+        self.assertNotIn("X", str(caught.exception))
 
 
 class EventMappingTests(unittest.TestCase):
@@ -124,6 +130,49 @@ class EventMappingTests(unittest.TestCase):
 
     def test_ag_path_of(self):
         self.assertEqual(events.ag_path_of(self.CALL), self.AG)
+
+    def test_caller_id_codec_and_volume_are_bounded(self):
+        huge = "9" * 10000
+        evs = events.properties_changed(self.CALL, events.CALL_IFACE, {
+            "State": "active\n" + "A" * 500,
+            "LineIdentification": huge + "\x00<script>",
+        })
+        self.assertEqual([e["type"] for e in evs], ["call-state", "caller-id"])
+        self.assertEqual(len(evs[0]["state"]), events.STATE_MAX)
+        self.assertNotIn("\n", evs[0]["state"])
+        self.assertEqual(len(evs[1]["number"]), events.CALLER_MAX)
+        self.assertNotIn("<", evs[1]["number"])
+        self.assertNotIn("\x00", evs[1]["number"])
+        self.assertIsNone(evs[1]["name"])
+
+        added = events.interfaces_added(self.CALL, {events.CALL_IFACE: {
+            "State": "incoming",
+            "LineIdentification": "1" * 500,
+            "Name": "Bob\x00" + "y" * 500,
+        }})[0]
+        self.assertLessEqual(len(added["number"]), events.CALLER_MAX)
+        self.assertLessEqual(len(added["name"]), events.CALLER_MAX)
+        self.assertNotIn("\x00", added["name"])
+        self.assertTrue(added["name"].startswith("Bob"))
+
+        connected = events.interfaces_added(self.AG, {events.AG_IFACE: {"Address": "AA:BB\n" + "C" * 100}})[0]
+        self.assertLessEqual(len(connected["address"]), events.ADDRESS_MAX)
+        self.assertNotIn("\n", connected["address"])
+
+        self.assertEqual(events.codec_name(huge), "")
+        self.assertFalse(events.is_wideband(huge))
+        self.assertEqual(events.codec_name(2), "mSBC")
+        self.assertEqual(events.codec_name(0), "")
+        self.assertEqual(events.codec_name(None), "")
+        self.assertFalse(events.is_wideband(None))
+        self.assertFalse(events.is_wideband(1))
+        self.assertTrue(events.is_wideband("2"))
+
+        volume = events.properties_changed(self.AG, events.AG_IFACE, {
+            "SpeakerVolume": 10 ** 1000, "MicrophoneVolume": 7,
+        })
+        self.assertEqual(volume, [{"type": "volume", "path": self.AG, "MicrophoneVolume": 7}])
+        self.assertEqual(events.properties_changed(self.AG, events.AG_IFACE, {"SpeakerVolume": "15"}), [])
 
 
 class FakePactl:
@@ -480,6 +529,27 @@ class TelephonyObjectsTests(unittest.TestCase):
         calls = tel.calls(ag)
         self.assertEqual(len(calls), 1)
         self.assertEqual(calls[0]["state"], "active")
+
+    def test_call_fields_from_the_phone_are_clipped(self):
+        from omaiphone.telephony import Telephony
+        tel = Telephony.__new__(Telephony)
+        ag = "/org/pipewire/Telephony/ag1"
+        tree = {
+            "/org/pipewire/Telephony": {ag: {events.AG_IFACE: {"Address": "AA"}}},
+            ag: {ag + "/call1": {events.CALL_IFACE: {
+                "State": "active" + "Z" * 100,
+                "LineIdentification": "1" * 500,
+                "Name": "N" * 500,
+                "IncomingLine": "I" * 500,
+            }}},
+        }
+        tel._managed = lambda path: tree[path]
+        call = tel.calls(ag)[0]
+        self.assertEqual(len(call["state"]), events.STATE_MAX)
+        self.assertTrue(call["state"].startswith("active"))
+        self.assertEqual(len(call["number"]), events.CALLER_MAX)
+        self.assertEqual(len(call["name"]), events.CALLER_MAX)
+        self.assertEqual(len(call["incoming"]), events.CALLER_MAX)
 
 
 class PrivateWriteTests(unittest.TestCase):
