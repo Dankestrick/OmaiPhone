@@ -15,6 +15,11 @@ from .audio import load_config
 from .companion import Session
 
 RETRY_SECONDS = (5, 15, 30, 60, 120, 300)
+
+
+def _log_line(text):
+    """One short log line. `text` can include an error string from the phone."""
+    return " ".join(str(text).split())[:180]
 RESOLVE_RETRY_SECONDS = 4        # BlueZ is still reading the phone's services
 TICK_SECONDS = 3
 PERMISSION_RETRY_TICKS = 10      # ask again every 30 s while the phone says "not allowed"
@@ -40,7 +45,7 @@ class Toaster:
         self.ids = {}   # phone uid -> desktop notification id
 
     def show(self, notification):
-        app, summary, body = notifications.toast_text(notification)
+        app, summary, body = notifications.toast_payload(notification)
         uid = notification["uid"]
         hints = {"urgency": GLib.Variant("y", 1), "category": GLib.Variant("s", "im.received"),
                  "desktop-entry": GLib.Variant("s", "omaiphone")}
@@ -244,7 +249,7 @@ class Mirror:
             return
         delay = RETRY_SECONDS[min(self._attempt, len(RETRY_SECONDS) - 1)]
         self._attempt += 1
-        self.log(f"notification link lost ({reason}); next try in {delay} s")
+        self.log(_log_line(f"notification link lost ({reason}); next try in {delay} s"))
         self._set_state("waiting", reason)
         self._cancel_retry()
         self._retry_timer = GLib.timeout_add_seconds(delay, self._again)
@@ -258,11 +263,13 @@ class Mirror:
             self._attempt = 0
             self.log("mirroring the iPhone's notifications")
         elif state in ("needs-permission", "unsupported"):
-            self.log(f"notifications not available: {detail}")
+            self.log(_log_line(f"notifications not available: {detail}"))
         self._set_state(state, detail)
 
     def _notification(self, notification):
         self.store.apply(notification)
+        for uid in self.store.dropped:
+            self.toaster.close(uid)
         if notifications.should_toast(notification, self.config):
             self.toaster.show(notification)
         self._publish()
@@ -293,7 +300,7 @@ class Mirror:
             try:
                 notifications.write_state(self.snapshot(), self.state_path)
             except OSError as error:
-                self.log(f"could not write the mirror state: {error}")
+                self.log(_log_line(f"could not write the mirror state: {error}"))
             return False
 
         self._publish_timer = GLib.timeout_add(PUBLISH_DELAY_MS, write)

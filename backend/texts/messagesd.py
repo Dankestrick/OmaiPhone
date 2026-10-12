@@ -40,6 +40,36 @@ def emit(event: dict) -> None:
     sys.stdout.flush()
 
 
+def notification_text(value: str, limit: int, keep_newlines: bool = False) -> str:
+    """Plain text for a desktop notification.
+
+    notify-send and the notification daemon treat the body as markup.
+    A name or a text from the phone must not become an option (`--urgency`)
+    or a tag (`<img>`, `<a href>`).
+    """
+    text = str(value or "").replace("\x00", "")
+    if keep_newlines:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    else:
+        text = " ".join(text.split())
+    text = text[:limit]
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def notification_argv(title: str, body: str) -> list[str]:
+    """notify-send arguments. `--` keeps a hostile title from being an option."""
+    safe_title = notification_text(title, 80) or "New message"
+    args = ["notify-send", "--app-name=Messages", "--urgency=normal", "--", safe_title]
+    if body:
+        args.append(notification_text(body, 120, keep_newlines=True))
+    return args
+
+
 def log_state(state: str) -> None:
     """Record a connection state. The string is one of the fixed state names."""
     if state not in {
@@ -69,19 +99,31 @@ def status_from_store(store: Store, ready: bool, detail: str) -> dict:
     }
 
 
+# A burst of texts must not start a notify-send for every one of them.
+_notify_running = 0
+_NOTIFY_LIMIT = 2
+
+
 async def notify(title: str, body: str) -> None:
     """Desktop notification. The title is a name, never a phone number."""
-    args = ["notify-send", "--app-name=Messages", "--urgency=normal", title]
-    if body:
-        args.append(body[:120])
+    global _notify_running
+    if _notify_running >= _NOTIFY_LIMIT:
+        return
+    _notify_running += 1
     try:
-        await asyncio.create_subprocess_exec(
-            *args,
+        proc = await asyncio.create_subprocess_exec(
+            *notification_argv(title, body),
             stdout=asyncio.subprocess.DEVNULL,
             stderr=asyncio.subprocess.DEVNULL,
         )
+        try:
+            await asyncio.wait_for(proc.wait(), timeout=5)
+        except TimeoutError:
+            proc.kill()
     except FileNotFoundError:
         return
+    finally:
+        _notify_running -= 1
 
 
 async def handle(raw: str, store: Store, session) -> None:

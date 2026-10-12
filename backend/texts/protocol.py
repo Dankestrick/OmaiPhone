@@ -237,10 +237,15 @@ def extract_bmessage_text(raw: str) -> str:
     """Pull the plain text out of a downloaded bMessage, ignoring attachments."""
     if not raw:
         return ""
+    # The download reader already refuses a huge file. This is the second gate
+    # for a caller that already has the text in memory.
+    if len(raw) > _PRESENT_SCAN * 4:
+        raw = raw[:_PRESENT_SCAN * 4]
     match = re.search(r"BEGIN:MSG\r?\n(.*?)\r?\nEND:MSG", raw, flags=re.DOTALL | re.IGNORECASE)
     if not match:
         return ""
-    return match.group(1).replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = match.group(1).replace("\r\n", "\n").replace("\r", "\n").strip()
+    return text[:_PRESENT_SCAN]
 
 
 def looks_like_attachment_payload(text: str) -> bool:
@@ -260,6 +265,11 @@ def looks_like_attachment_payload(text: str) -> bool:
     return False
 
 
+# Shown text is short. Scanning a multi-megabyte body for a base64 run
+# would copy the whole thing.
+_PRESENT_SCAN = 8000
+
+
 def present_message(body: str, has_attachment: bool) -> str:
     """Text the overlay is allowed to show.
 
@@ -267,6 +277,8 @@ def present_message(body: str, has_attachment: bool) -> str:
     attached, the transcript keeps the words and adds one plain line.
     """
     text = (body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(text) > _PRESENT_SCAN:
+        text = text[:_PRESENT_SCAN]
     if looks_like_attachment_payload(text):
         text = ""
         has_attachment = True
@@ -277,12 +289,20 @@ def present_message(body: str, has_attachment: bool) -> str:
     return text
 
 
+# A bMessage carries two cards. More than this, or a huge field, is hostile.
+_MAX_CARDS = 8
+_MAX_VALUES = 8
+_MAX_FIELD = 200
+
+
 def parse_vcards(raw: str) -> list[dict]:
     """Read names, phones, and emails out of a PBAP vCard file.
 
     PBAP is the Bluetooth phone book. Each card can carry several numbers.
     Callers still run those numbers through the E.164 helpers before sending.
     """
+    if len(raw) > _PRESENT_SCAN * 4:
+        raw = raw[:_PRESENT_SCAN * 4]
     people = []
     current = None
     for raw_line in raw.splitlines():
@@ -299,6 +319,8 @@ def parse_vcards(raw: str) -> list[dict]:
             if current and (current["name"] or current["phones"] or current["emails"]):
                 people.append(current)
             current = None
+            if len(people) >= _MAX_CARDS:
+                break
             continue
         if current is None or ":" not in line:
             continue
@@ -308,12 +330,12 @@ def parse_vcards(raw: str) -> list[dict]:
         field = key.split(";")[0].upper()
         if "." in field:
             field = field.rsplit(".", 1)[-1]
-        value = value.strip()
+        value = value.replace("\x00", "").strip()[:_MAX_FIELD]
         if field == "FN" and value:
             current["name"] = value
-        elif field == "TEL" and value:
+        elif field == "TEL" and value and len(current["phones"]) < _MAX_VALUES:
             current["phones"].append(value)
-        elif field == "EMAIL" and value:
+        elif field == "EMAIL" and value and len(current["emails"]) < _MAX_VALUES:
             current["emails"].append(value)
     return people
 
@@ -350,9 +372,20 @@ def public_error(exc: BaseException) -> str:
         return "Bluetooth messaging is not running. Install bluez-obex and make sure Bluetooth is on."
     if "org.bluez.error.authentication" in lowered or "authentication" in lowered and "cancel" in lowered:
         return "Pairing was cancelled."
-    # Keep a short class name when the text might contain a device path.
+    # Keep a short class name when the text might contain a device path,
+    # a phone number, or message text. The fallback is shown in the overlay.
     name = type(exc).__name__
-    if len(text) > 160 or "BEGIN:MSG" in text or "BEGIN:VCARD" in text:
-        return f"Bluetooth error ({name})."
     one_line = " ".join(text.split())
-    return one_line or f"Bluetooth error ({name})."
+    digits = sum(ch.isdigit() for ch in one_line)
+    safe = (
+        0 < len(one_line) <= 160
+        and digits < 6
+        and "@" not in one_line
+        and "/" not in one_line
+        and "<" not in one_line
+        and ">" not in one_line
+        and "BEGIN:" not in one_line.upper()
+    )
+    if not safe:
+        return f"Bluetooth error ({name})."
+    return one_line

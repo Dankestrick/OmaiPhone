@@ -122,6 +122,20 @@ def error_response(opcode, handle, code):
     return struct.pack("<BBHB", OP_ERROR, opcode, handle, code)
 
 
+def _next_handle(start, cursor):
+    """The next handle to ask for, or None when the phone did not move forward.
+
+    A response whose end handle is below the handle we just asked from would
+    otherwise request the same range again, forever.
+    """
+    if not isinstance(cursor, int) or cursor < 0 or cursor >= 0xFFFF:
+        return None
+    nxt = cursor + 1
+    if nxt <= start:
+        return None
+    return nxt
+
+
 def parse_services(pdu):
     """Read By Group Type response -> [(first handle, last handle, uuid)]."""
     size = pdu[1]
@@ -245,7 +259,10 @@ class AttClient:
                 last = found[-1][1]
                 if last >= 0xFFFF:
                     return on_done(found, None)
-                step(last + 1)
+                nxt = _next_handle(start, last)
+                if nxt is None:
+                    return on_done(None, ValueError("service discovery did not advance"))
+                step(nxt)
             self.request(read_by_group_request(start), reply)
 
         step(1)
@@ -272,7 +289,10 @@ class AttClient:
                     found.extend(parse_characteristics(pdu))
                 except (ValueError, struct.error, IndexError) as broken:
                     return on_done(None, broken)
-                step(found[-1][0] + 1)
+                nxt = _next_handle(start, found[-1][0])
+                if nxt is None:
+                    return on_done(None, ValueError("characteristic discovery did not advance"))
+                step(nxt)
             self.request(read_by_type_request(start, last), reply)
 
         step(first)
@@ -297,7 +317,10 @@ class AttClient:
                         return on_done(handle, None)
                 if not descriptors:
                     return on_done(None, None)
-                step(descriptors[-1][0] + 1)
+                nxt = _next_handle(begin, descriptors[-1][0])
+                if nxt is None:
+                    return on_done(None, ValueError("descriptor discovery did not advance"))
+                step(nxt)
             self.request(find_information_request(begin, end), reply)
 
         step(start)

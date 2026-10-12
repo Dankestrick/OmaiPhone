@@ -44,6 +44,16 @@ from store import Store, runtime_dir, shared_contacts_file
 _ANCS_UUID = "7905f431-b5ce-4e99-a40f-4b1e122d00d0"
 # Failed downloads of one message before it is left as a preview.
 _MAX_DOWNLOAD_TRIES = 3
+# How many message handles to remember. A phone can announce a new handle
+# forever; the dicts must not grow with it.
+_MAX_TRACKED_HANDLES = 500
+# A text is a few kilobytes. Anything larger is not stored or parsed.
+_MAX_BMESSAGE_BYTES = 128 * 1024
+# MAP handles are hex, at most 16 digits. Anything else must not become a path.
+_HANDLE_TOKEN = re.compile(r"^[0-9A-Fa-f]{1,16}$")
+# The shared phone book is written by us, but only after a download. Refuse
+# to parse a file that has grown past the download cap.
+_MAX_CONTACTS_FILE = 2 * 1024 * 1024
 _OBEX_CANDIDATES = (
     "/usr/lib/bluetooth/obexd",
     "/usr/libexec/bluetooth/obexd",
@@ -94,6 +104,37 @@ def _listing_entries(listing) -> list[tuple[str, dict]]:
         elif isinstance(entry, dict):
             rows.append((str(entry.get("Path") or ""), {key: _unwrap(val) for key, val in entry.items()}))
     return rows
+
+
+def incoming_bmessage_path(root: Path, handle: str) -> Path | None:
+    """Path for one downloaded text, or None when the handle is not a safe file name.
+
+    The handle comes from the phone. It is only a name inside `root`, never a
+    path: `../`, an absolute path, or a too-long token would make obexd write
+    (and us delete) a file outside the runtime directory.
+    """
+    if not isinstance(handle, str) or not _HANDLE_TOKEN.fullmatch(handle):
+        return None
+    directory = Path(root)
+    path = directory / f"incoming-{handle}.bmsg"
+    if path.parent != directory:
+        return None
+    return path
+
+
+def prepare_download_file(path: Path) -> None:
+    """Create `path` as a regular file, mode 0600. Refuse to follow a symlink."""
+    fd = os.open(path, os.O_CREAT | os.O_TRUNC | os.O_WRONLY | os.O_NOFOLLOW, 0o600)
+    os.close(fd)
+
+
+def read_bounded_text(path: Path, limit: int = _MAX_BMESSAGE_BYTES) -> str:
+    """Read a downloaded text, or "" when it is larger than `limit` bytes."""
+    with open(path, "rb") as handle:
+        blob = handle.read(limit + 1)
+    if len(blob) > limit:
+        return ""
+    return blob.decode("utf-8", errors="replace")
 
 
 def _map_time(value: str) -> str:
@@ -663,7 +704,7 @@ class BluetoothSession:
         for path, fields in _listing_entries(listing):
             handle = _handle_from(path, fields)
             if path and handle:
-                self._message_paths[handle] = path
+                self._remember_handle(handle, path)
             # The listing is a preview. The full text, and often the phone
             # number, are inside the downloaded message.
             self._ingest(fields, path=path, announce=announce)
@@ -694,7 +735,7 @@ class BluetoothSession:
                 continue
             if self._gave_up(handle):
                 continue
-            self._message_paths[handle] = str(path)
+            self._remember_handle(handle, str(path))
             await self._download_body(handle, announce=announce, sent=bool(props.get("Sent")))
             after = self.store.record(handle)
             if after and (current is None or not current["body_complete"]):
@@ -704,7 +745,7 @@ class BluetoothSession:
     def _ingest(self, fields: dict, path: str, announce: bool) -> tuple[dict, bool] | None:
         handle = _handle_from(path, fields)
         if path and handle:
-            self._message_paths[handle] = path
+            self._remember_handle(handle, path)
         sender = str(fields.get("SenderAddress") or fields.get("Sender") or "")
         # A brand-new text often arrives with no sender yet. The download
         # step fills that in. Skipping here would drop the text.
@@ -763,13 +804,28 @@ class BluetoothSession:
         for _ in range(20):
             try:
                 if target.exists() and target.stat().st_size > 0:
-                    last = target.read_text(encoding="utf-8", errors="replace")
+                    last = read_bounded_text(target)
+                    if not last:
+                        return ""
                     if "BEGIN:MSG" in last.upper():
                         return last
             except OSError:
                 pass
             await asyncio.sleep(0.05)
         return last
+
+    def _remember_handle(self, handle: str, path: str) -> None:
+        """Keep the obex object path for a handle, dropping the oldest when full."""
+        if not handle or not path:
+            return
+        self._message_paths[handle] = path
+        while len(self._message_paths) > _MAX_TRACKED_HANDLES:
+            self._message_paths.pop(next(iter(self._message_paths)))
+
+    def _note_download_failure(self, handle: str) -> None:
+        self._download_failures[handle] = self._download_failures.get(handle, 0) + 1
+        while len(self._download_failures) > _MAX_TRACKED_HANDLES:
+            self._download_failures.pop(next(iter(self._download_failures)))
 
     def _gave_up(self, handle: str) -> bool:
         return self._download_failures.get(handle, 0) >= _MAX_DOWNLOAD_TRIES
@@ -782,13 +838,18 @@ class BluetoothSession:
         if await self._fetch_body(handle, path, announce, sent):
             self._download_failures.pop(handle, None)
         else:
-            self._download_failures[handle] = self._download_failures.get(handle, 0) + 1
+            self._note_download_failure(handle)
 
     async def _fetch_body(self, handle: str, path: str, announce: bool, sent: bool | None) -> bool:
         """One download attempt. False when nothing usable came back."""
-        target = runtime_dir() / f"incoming-{handle}.bmsg"
+        target = incoming_bmessage_path(runtime_dir(), handle)
+        if target is None:
+            return False
         raw = ""
         try:
+            # Create the file ourselves, mode 0600, so obexd's open cannot
+            # follow a symlink or leave the text world-readable.
+            prepare_download_file(target)
             message = await self._iface("org.bluez.obex", path, "org.bluez.obex.Message1", self._session_bus)
             # attachment=False: never copy image bytes onto this computer.
             result = await message.call_get(str(target), False)
@@ -848,7 +909,14 @@ class BluetoothSession:
         if mtime == self._contacts_mtime:
             return self.store.contact_count() > 0
         try:
-            entries = json.loads(path.read_text(encoding="utf-8")).get("contacts", [])
+            with path.open("rb") as handle:
+                raw = handle.read(_MAX_CONTACTS_FILE + 1)
+            if len(raw) > _MAX_CONTACTS_FILE:
+                return self.store.contact_count() > 0
+            payload = json.loads(raw.decode("utf-8"))
+            entries = payload.get("contacts", []) if isinstance(payload, dict) else []
+            if not isinstance(entries, list):
+                entries = []
         except (OSError, ValueError):
             return self.store.contact_count() > 0
         self._contacts_mtime = mtime
@@ -922,7 +990,7 @@ class BluetoothSession:
         """Save a text the iPhone just announced."""
         handle = _handle_from(path, fields)
         if path and handle:
-            self._message_paths[handle] = path
+            self._remember_handle(handle, path)
         announce = self._announce_live
         async with self.lock:
             self._ingest(fields, path=path, announce=announce)

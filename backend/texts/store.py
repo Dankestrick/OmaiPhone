@@ -8,6 +8,7 @@ plugin never asks for one.
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import sqlite3
@@ -21,6 +22,26 @@ THREADS_MAX = 300
 MESSAGES_MAX = 500
 BODY_MAX = 4000
 LABEL_MAX = 200
+# What is written down, not only what one event may carry. A phone can send
+# a multi-megabyte subject or a new text forever.
+ID_MAX = 128
+ADDRESS_MAX = 200
+STAMP_MAX = 40
+CONTACTS_MAX = 5000
+ROW_MAX = 2000
+
+
+def _bound_text(value: str, limit: int) -> str:
+    return str(value or "").replace("\x00", "")[:limit]
+
+
+def _bound_id(value: str) -> str:
+    """Shorten an id the phone chose so it cannot be a huge database key."""
+    text = str(value or "").replace("\x00", "")
+    if 1 <= len(text) <= ID_MAX:
+        return text
+    digest = hashlib.sha256(text.encode("utf-8", "replace")).hexdigest()[:32]
+    return "id-" + digest
 
 
 def _ensure_mode(path: Path, mode: int) -> None:
@@ -145,16 +166,20 @@ class Store:
     def replace_contacts(self, people: list[dict]) -> None:
         """Swap the contact cache. `people` items have name, address, and kind."""
         self._db.execute("DELETE FROM contacts")
+        stored = 0
         for person in people:
-            address = str(person.get("address") or "")
+            if stored >= CONTACTS_MAX:
+                break
+            address = _bound_text(person.get("address") or "", ADDRESS_MAX)
             kind = str(person.get("kind") or "")
-            name = str(person.get("name") or address)
+            name = _bound_text(person.get("name") or address, LABEL_MAX)
             if not address or kind not in ("tel", "email"):
                 continue
             self._db.execute(
                 "INSERT OR REPLACE INTO contacts (name, address, kind) VALUES (?, ?, ?)",
-                (name[:200], address, kind),
+                (name, address, kind),
             )
+            stored += 1
         self._db.commit()
 
     def contact_count(self) -> int:
@@ -237,9 +262,15 @@ class Store:
         peer_label: str = "",
     ) -> tuple[dict, bool]:
         """Insert or update one text. Returns the row and whether it was new."""
+        external_id = _bound_id(external_id)
+        address = _bound_text(address, ADDRESS_MAX)
+        body = _bound_text(body, BODY_MAX)
+        timestamp = _bound_text(timestamp, STAMP_MAX) or self.now_stamp()
+        if direction not in ("in", "out"):
+            direction = "in"
         own = self.settings()["ownNumber"]
         key = thread_key(address, own)
-        label = peer_label or self.label_for(address) or ""
+        label = _bound_text(peer_label or self.label_for(address) or "", LABEL_MAX)
         if not label or label == address:
             earlier = self._db.execute(
                 """
@@ -251,8 +282,7 @@ class Store:
             ).fetchone()
             if earlier:
                 label = earlier["peer_label"]
-        if not label:
-            label = address
+        label = _bound_text(label or address, LABEL_MAX)
         existing = self._db.execute(
             "SELECT id, read, body_complete FROM messages WHERE external_id = ?",
             (external_id,),
@@ -303,7 +333,24 @@ class Store:
             ),
         )
         self._db.commit()
+        self._prune_messages()
         return self._message_by_id(cur.lastrowid), True
+
+    def _prune_messages(self) -> None:
+        """Drop the oldest texts once the phone has filled the table."""
+        row = self._db.execute("SELECT COUNT(*) AS n FROM messages").fetchone()
+        extra = int(row["n"]) - ROW_MAX
+        if extra <= 0:
+            return
+        self._db.execute(
+            """
+            DELETE FROM messages WHERE id IN (
+              SELECT id FROM messages ORDER BY timestamp ASC, id ASC LIMIT ?
+            )
+            """,
+            (extra,),
+        )
+        self._db.commit()
 
     def _message_by_id(self, message_id: int) -> dict:
         row = self._db.execute("SELECT * FROM messages WHERE id = ?", (message_id,)).fetchone()

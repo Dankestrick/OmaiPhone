@@ -104,6 +104,17 @@ class AttachmentTests(unittest.TestCase):
     def test_image_only_message_is_a_placeholder(self):
         self.assertEqual(protocol.present_message("", True), "attachment omitted")
 
+    def test_a_huge_body_is_cut_before_it_is_scanned(self):
+        shown = protocol.present_message("!" * (protocol._PRESENT_SCAN + 50), False)
+        self.assertEqual(len(shown), protocol._PRESENT_SCAN)
+        raw = (
+            "BEGIN:MSG\r\n"
+            + ("B" * (protocol._PRESENT_SCAN + 10))
+            + "\r\nEND:MSG\r\n"
+            + ("C" * (protocol._PRESENT_SCAN * 4))
+        )
+        self.assertEqual(len(protocol.extract_bmessage_text(raw)), protocol._PRESENT_SCAN)
+
 
 class VCardTests(unittest.TestCase):
     def test_reads_name_phone_and_email(self):
@@ -120,6 +131,14 @@ class VCardTests(unittest.TestCase):
         self.assertEqual(people[0]["name"], "Ada Lovelace")
         self.assertEqual(people[0]["phones"], ["+15551234567"])
         self.assertEqual(people[0]["emails"], ["ada@example.com"])
+
+    def test_cards_and_fields_are_capped(self):
+        card = "BEGIN:VCARD\nFN:" + ("N" * 500) + "\n" + "".join(f"TEL:{i}\n" for i in range(20)) + "END:VCARD\n"
+        raw = card * (protocol._MAX_CARDS + 4)
+        people = protocol.parse_vcards(raw)
+        self.assertEqual(len(people), protocol._MAX_CARDS)
+        self.assertEqual(len(people[0]["name"]), protocol._MAX_FIELD)
+        self.assertEqual(len(people[0]["phones"]), protocol._MAX_VALUES)
 
 
 class NotificationTests(unittest.TestCase):

@@ -97,6 +97,55 @@ class AttClientTests(unittest.TestCase):
         self.assertTrue(answers[0].needs_permission)
         self.assertEqual(str(answers[0]), "insufficient authorization")
 
+    def test_discovery_stops_when_the_phone_does_not_advance(self):
+        sent, done = [], []
+
+        def send(pdu):
+            sent.append(pdu)
+            if len(sent) > 2:
+                raise AssertionError("discovery kept requesting")
+            # End handle 0 is behind the start handle, so the next request would repeat.
+            client.feed(bytes([att.OP_READ_BY_GROUP_RSP, 6]) + struct.pack("<HHH", 1, 0, 0x1800))
+
+        client = att.AttClient(send)
+        client.discover_services(lambda services, error: done.append((services, error)))
+        self.assertEqual(len(sent), 1)
+        self.assertIsNone(done[0][0])
+        self.assertIsInstance(done[0][1], ValueError)
+
+    def test_discovery_follows_one_advancing_range(self):
+        sent, done = [], []
+
+        def send(pdu):
+            sent.append(pdu)
+            start = struct.unpack_from("<H", pdu, 1)[0]
+            if start == 1:
+                client.feed(bytes([att.OP_READ_BY_GROUP_RSP, 6]) + struct.pack("<HHH", 1, 5, 0x1800))
+            else:
+                client.feed(att.error_response(att.OP_READ_BY_GROUP_REQ, start, att.ERR_ATTRIBUTE_NOT_FOUND))
+
+        client = att.AttClient(send)
+        client.discover_services(lambda services, error: done.append((services, error)))
+        self.assertEqual([struct.unpack_from("<H", pdu, 1)[0] for pdu in sent], [1, 6])
+        self.assertIsNone(done[0][1])
+        self.assertEqual(done[0][0], [(1, 5, att.BASE_UUID % 0x1800)])
+
+    def test_characteristic_discovery_stops_when_the_handle_does_not_advance(self):
+        sent, done = [], []
+
+        def send(pdu):
+            sent.append(pdu)
+            if len(sent) > 2:
+                raise AssertionError("discovery kept requesting")
+            # Declaration handle 0 does not move the cursor past the start handle.
+            client.feed(bytes([att.OP_READ_BY_TYPE_RSP, 7]) + struct.pack("<HBHH", 0, 0x02, 2, 0x2A00))
+
+        client = att.AttClient(send)
+        client.discover_characteristics(1, 20, lambda chars, error: done.append((chars, error)))
+        self.assertEqual(len(sent), 1)
+        self.assertIsNone(done[0][0])
+        self.assertIsInstance(done[0][1], ValueError)
+
     def test_fail_pending_releases_everyone(self):
         answers = []
         client = att.AttClient(lambda pdu: None)
@@ -146,6 +195,60 @@ class AncsCodecTests(unittest.TestCase):
         self.assertEqual(ancs.parse_media_update(bytes([1, 0, 0]) + b"3"), {})
         self.assertEqual(ancs.parse_media_update(b"\x02"), {})
         self.assertEqual(ancs.parse_supported_commands(bytes([4, 0, 1, 99])), ["pause", "play", "previous"])
+        long_title = b"T" * (ancs.MAX_MEDIA_CHARS + 40)
+        self.assertEqual(len(ancs.parse_media_update(bytes([2, 2, 0]) + long_title)["title"]), ancs.MAX_MEDIA_CHARS)
+
+    def test_oversized_attribute_is_rejected_before_the_bytes_arrive(self):
+        huge = b"\x00" + struct.pack("<I", 1) + struct.pack("<BH", 3, ancs.MAX_VALUE_BYTES + 1)
+        with self.assertRaises(ancs.Rejected):
+            ancs.parse_notification_attributes(huge, expected=1)
+        # A length we did ask for, but the bytes are not here yet, is still incomplete.
+        pending = b"\x00" + struct.pack("<I", 1) + struct.pack("<BH", 3, 10)
+        self.assertIsNone(ancs.parse_notification_attributes(pending, expected=1))
+        with self.assertRaises(ancs.Rejected):
+            ancs.parse_app_attributes(b"\x01" + b"a" * (ancs.MAX_APP_ID + 5))
+
+
+class SessionCapTests(unittest.TestCase):
+    def test_hostile_attribute_ends_the_command(self):
+        session = Session(lambda _packet: None)
+        session.state = "ready"
+        session._current = ("attributes", 1, 0)
+        session._data = b"\x00" + struct.pack("<I", 1) + struct.pack("<BH", 3, 5000)
+        session._data_arrived()
+        self.assertIsNone(session._current)
+        self.assertEqual(session._data, b"")
+
+    def test_data_source_buffer_stays_bounded(self):
+        session = Session(lambda _packet: None)
+        session.state = "ready"
+        session._handles[ancs.DATA_SOURCE] = 9
+        session._current = ("attributes", 1, 0)
+        session._on_notify(9, b"\x01" + b"x" * (ancs.MAX_ACCUMULATED + 100))
+        self.assertLessEqual(len(session._data), ancs.MAX_ACCUMULATED)
+
+    def test_notification_uids_are_capped(self):
+        removed = []
+        session = Session(lambda _packet: None, on_removed=removed.append)
+        session.state = "ready"
+        session._handles[ancs.CONTROL_POINT] = 4
+        for uid in range(session_limit()):
+            session._event({"event": "added", "uid": uid, "category": "other", "silent": False,
+                            "important": False, "preexisting": False, "canDismiss": False, "canAct": False,
+                            "categoryCount": 1})
+        self.assertLessEqual(len(session._events), companion_max())
+        self.assertTrue(removed)
+        self.assertIn(0, removed)
+
+
+def session_limit():
+    from omaiphone.companion import MAX_TRACKED
+    return MAX_TRACKED + 25
+
+
+def companion_max():
+    from omaiphone.companion import MAX_TRACKED
+    return MAX_TRACKED
 
 
 class SessionTests(unittest.TestCase):

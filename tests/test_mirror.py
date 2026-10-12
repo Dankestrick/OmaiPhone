@@ -19,6 +19,7 @@ try:
     from omaiphone.mirror import Mirror
 except ImportError:      # PyGObject lives in the system Python only
     GLib = None
+    mirror_module = None
 
 
 def notification(uid, **changes):
@@ -49,6 +50,17 @@ class StoreTests(unittest.TestCase):
         listing = store.listing()
         self.assertEqual(len(listing), notifications.LIMIT)
         self.assertEqual(listing[0]["uid"], notifications.LIMIT + 14)
+        self.assertEqual(len(store.items), notifications.LIMIT)
+        self.assertNotIn(0, store.items)
+        self.assertTrue(store.dropped)
+
+    def test_fields_from_the_phone_are_clipped(self):
+        store = notifications.Store()
+        store.apply(notification(1, title="T\x00" + "T" * 800, message="M" * 800))
+        saved = store.items[1]
+        self.assertEqual(len(saved["title"]), notifications.FIELD_MAX)
+        self.assertEqual(len(saved["message"]), notifications.FIELD_MAX)
+        self.assertNotIn("\x00", saved["title"])
 
 
 class ToastRuleTests(unittest.TestCase):
@@ -72,6 +84,21 @@ class ToastRuleTests(unittest.TestCase):
         self.assertEqual(notifications.toast_text(notification(1, subtitle="Family")),
                          ("Messages", "Mum", "Family\nCall me back"))
         self.assertEqual(notifications.toast_text(notification(1, app="", title="", message="")), ("iPhone", "iPhone", ""))
+
+    def test_toast_payload_is_plain_text(self):
+        app, summary, body = notifications.toast_payload(
+            notification(1, app='<img src="http://evil/a">', title="--help", message='<a href="http://evil">x</a>'))
+        self.assertNotIn("<", app + summary + body)
+        self.assertIn("&lt;", body)
+        self.assertLessEqual(len(summary), 120)
+        self.assertLessEqual(len(body), 400)
+
+    def test_log_line_cannot_carry_a_phone_blob(self):
+        if mirror_module is None:
+            self.skipTest("PyGObject is not installed")
+        line = mirror_module._log_line("notification link lost (" + ("secret\n" * 80) + ")")
+        self.assertNotIn("\n", line)
+        self.assertLessEqual(len(line), 180)
 
 
 class StateFileTests(unittest.TestCase):

@@ -36,6 +36,18 @@ ACTION_POSITIVE, ACTION_NEGATIVE = 0, 1
 NOTIFICATION_ATTRIBUTES = ((ATTR_APP_ID, None), (ATTR_TITLE, 96), (ATTR_SUBTITLE, 96), (ATTR_MESSAGE, 400),
                            (ATTR_DATE, None))
 
+# The phone is supposed to honour the maximum above. A hostile one can set the
+# 16-bit length to 65535. Anything past this is rejected instead of buffered.
+MAX_VALUE_BYTES = 512
+MAX_APP_ID = 128
+MAX_MEDIA_CHARS = 200
+# Header plus every attribute at the cap, with room for the app-id string.
+MAX_ACCUMULATED = 4096
+
+
+class Rejected(ValueError):
+    """The phone sent a field larger than the size we asked for."""
+
 
 def category_name(category):
     return CATEGORIES[category] if 0 <= category < len(CATEGORIES) else "other"
@@ -79,16 +91,24 @@ def perform_action(uid, action):
 
 
 def _attributes(data, offset, expected):
-    """Read `expected` (id, length, value) tuples; None while the answer is incomplete."""
+    """Read `expected` (id, length, value) tuples.
+
+    None while the answer is incomplete. Raises Rejected when a length is
+    past MAX_VALUE_BYTES, even if those bytes have not arrived yet, so the
+    caller can drop the buffer instead of waiting for 64 KiB.
+    """
     found = {}
     for _ in range(expected):
         if offset + 3 > len(data):
             return None
         attribute, length = struct.unpack_from("<BH", data, offset)
         offset += 3
+        if length > MAX_VALUE_BYTES:
+            raise Rejected("attribute %d is %d bytes" % (attribute, length))
         if offset + length > len(data):
             return None
-        found[attribute] = data[offset:offset + length].decode("utf-8", "replace")
+        raw = data[offset:offset + length].replace(b"\x00", b"")
+        found[attribute] = raw.decode("utf-8", "replace")
         offset += length
     return found
 
@@ -112,7 +132,11 @@ def parse_app_attributes(data, expected=1):
         return None
     end = data.find(b"\x00", 1)
     if end == -1:
+        if len(data) > 1 + MAX_APP_ID:
+            raise Rejected("app id has no end")
         return None
+    if end - 1 > MAX_APP_ID:
+        raise Rejected("app id is %d bytes" % (end - 1))
     attributes = _attributes(data, end + 1, expected)
     return None if attributes is None else (data[1:end].decode("utf-8", "replace"), attributes)
 
@@ -150,7 +174,7 @@ def parse_media_update(value):
     if len(value) < 3:
         return {}
     entity, attribute = value[0], value[1]
-    text = value[3:].decode("utf-8", "replace")
+    text = value[3:3 + MAX_MEDIA_CHARS].decode("utf-8", "replace")
     if entity == ENTITY_TRACK:
         field = {TRACK_ARTIST: "artist", TRACK_ALBUM: "album", TRACK_TITLE: "title"}.get(attribute)
         return {field: text} if field else {}

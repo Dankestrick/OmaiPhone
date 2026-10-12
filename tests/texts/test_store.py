@@ -39,6 +39,58 @@ class StoreTests(unittest.TestCase):
         self.assertEqual(messages[-1]["id"], created["id"])  # newest kept, oldest first
         self.assertTrue(all(len(m["body"]) <= store.BODY_MAX for m in messages))
 
+    def test_phone_fields_are_bounded_in_the_database(self):
+        self.db.set_own_number("+15550001111")
+        self.db.upsert_message(
+            external_id="h" * 500,
+            address="+" + "1" * 400,
+            body="y" * (store.BODY_MAX + 50),
+            direction="sideways",
+            timestamp="t" * 80,
+            read=False,
+            has_attachment=False,
+            body_complete=True,
+            peer_label="n" * 500,
+        )
+        row = self.db._db.execute(
+            "SELECT external_id, body, peer_label, direction, timestamp, thread_key FROM messages"
+        ).fetchone()
+        self.assertLessEqual(len(row["external_id"]), store.ID_MAX)
+        self.assertLessEqual(len(row["body"]), store.BODY_MAX)
+        self.assertLessEqual(len(row["peer_label"]), store.LABEL_MAX)
+        self.assertLessEqual(len(row["timestamp"]), store.STAMP_MAX)
+        self.assertEqual(row["direction"], "in")
+        self.assertNotIn("..", row["thread_key"])
+        people = [
+            {"name": "n" * 500, "address": f"+1555{i:07d}", "kind": "tel"}
+            for i in range(store.CONTACTS_MAX + 10)
+        ]
+        self.db.replace_contacts(people)
+        self.assertEqual(self.db.contact_count(), store.CONTACTS_MAX)
+        contact = self.db._db.execute("SELECT name, address FROM contacts LIMIT 1").fetchone()
+        self.assertLessEqual(len(contact["name"]), store.LABEL_MAX)
+        self.assertLessEqual(len(contact["address"]), store.ADDRESS_MAX)
+
+    def test_old_messages_are_dropped_once_the_table_is_full(self):
+        self.db.set_own_number("+15550001111")
+        for i in range(store.ROW_MAX + 5):
+            self.db.upsert_message(
+                external_id=f"map-{i}",
+                address="+15552223333",
+                body="hi",
+                direction="in",
+                timestamp=f"2026-01-01T00:{i // 60:02d}:{i % 60:02d}",
+                read=True,
+                has_attachment=False,
+                body_complete=True,
+            )
+        count = self.db._db.execute("SELECT COUNT(*) AS n FROM messages").fetchone()["n"]
+        self.assertEqual(count, store.ROW_MAX)
+        newest = self.db.record(f"map-{store.ROW_MAX + 4}")
+        oldest = self.db.record("map-0")
+        self.assertIsNotNone(newest)
+        self.assertIsNone(oldest)
+
     def test_database_file_is_private(self):
         mode = os.stat(self.db.path).st_mode & 0o777
         self.assertEqual(mode, 0o600)

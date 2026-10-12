@@ -11,6 +11,7 @@ import os
 from .audio import STATE_DIR, write_private
 
 LIMIT = 60
+FIELD_MAX = 500
 
 # Without a runtime directory the state falls back to the user's state
 # directory, still private to the user but on disk.
@@ -26,16 +27,50 @@ PUBLIC_FIELDS = ("uid", "appId", "app", "title", "subtitle", "message", "date", 
                  "canDismiss")
 
 
+def plain_markup(value, limit, keep_newlines=False):
+    """Escape text for a notification daemon that renders the body as markup."""
+    text = str(value or "").replace("\x00", "")
+    if keep_newlines:
+        text = text.replace("\r\n", "\n").replace("\r", "\n")
+    else:
+        text = " ".join(text.split())
+    text = text[:limit]
+    return (
+        text.replace("&", "&amp;")
+        .replace("<", "&lt;")
+        .replace(">", "&gt;")
+        .replace('"', "&quot;")
+    )
+
+
+def _field(value):
+    if isinstance(value, str):
+        return value.replace("\x00", "")[:FIELD_MAX]
+    return value
+
+
 class Store:
     """The phone's current notifications, newest first."""
 
     def __init__(self):
         self.items = {}
+        self.dropped = []
 
     def apply(self, notification):
-        """Add or replace. Returns True when this uid was not known before."""
-        new = notification["uid"] not in self.items
-        self.items[notification["uid"]] = {key: notification.get(key) for key in PUBLIC_FIELDS}
+        """Add or replace. Returns True when this uid was not known before.
+
+        `dropped` is the uids evicted to keep the list at LIMIT. The caller
+        closes those desktop notifications.
+        """
+        self.dropped = []
+        uid = notification["uid"]
+        new = uid not in self.items
+        self.items.pop(uid, None)
+        self.items[uid] = {key: _field(notification.get(key)) for key in PUBLIC_FIELDS}
+        while len(self.items) > LIMIT:
+            oldest = min(self.items, key=lambda item: (self.items[item]["date"] or "", self.items[item]["uid"]))
+            self.items.pop(oldest, None)
+            self.dropped.append(oldest)
         return new
 
     def remove(self, uid):
@@ -75,6 +110,16 @@ def toast_text(notification):
     title = notification.get("title") or app
     lines = [text for text in (notification.get("subtitle"), notification.get("message")) if text]
     return app, title, "\n".join(lines)
+
+
+def toast_payload(notification):
+    """The same three strings, escaped and capped for the notification daemon."""
+    app, title, body = toast_text(notification)
+    return (
+        plain_markup(app, 80) or "iPhone",
+        plain_markup(title, 120) or "iPhone",
+        plain_markup(body, 400, keep_newlines=True),
+    )
 
 
 def snapshot(enabled, state="off", detail="", store=None, media=None, battery=None):

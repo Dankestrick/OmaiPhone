@@ -341,6 +341,38 @@ class ContactsTests(unittest.TestCase):
             names = [c["name"] for c in self.contacts.load_contacts(path)]
             self.assertEqual(names, ["Anna Muster", "Max Mustermann", "Notruf"])
 
+    def test_a_huge_phone_book_is_cut(self):
+        one = "BEGIN:VCARD\nFN:" + ("N" * 400) + "\n" + "".join(f"TEL:{n}\n" for n in range(30)) + "END:VCARD\n"
+        first = self.contacts.parse_vcards(one)
+        self.assertEqual(len(first[0]["name"]), self.contacts.MAX_NAME)
+        self.assertEqual(len(first[0]["numbers"]), self.contacts.MAX_PER_CARD)
+        cards = [
+            f"BEGIN:VCARD\nFN:P{i}\nTEL:1\nEND:VCARD\n"
+            for i in range(self.contacts.MAX_CONTACTS + 5)
+        ]
+        parsed = self.contacts.parse_vcards("".join(cards))
+        self.assertEqual(len(parsed), self.contacts.MAX_CONTACTS)
+
+    def test_download_path_cannot_leave_the_temp_dir(self):
+        with self.assertRaises(self.contacts.ContactsError):
+            self.contacts.take_obex_download("/etc/hostname")
+        self.assertTrue(os.path.exists("/etc/hostname"))
+        with tempfile.TemporaryDirectory() as tmp:
+            secret = os.path.join(tmp, "secret")
+            with open(secret, "w") as handle:
+                handle.write("hidden")
+            link = os.path.join(tmp, "obex-client-link")
+            os.symlink(secret, link)
+            with self.assertRaises(self.contacts.ContactsError):
+                self.contacts.read_obex_download(link)
+            with open(secret) as handle:
+                self.assertEqual(handle.read(), "hidden")
+            blob = os.path.join(tmp, "book.vcf")
+            with open(blob, "wb") as handle:
+                handle.write(b"A" * (self.contacts.MAX_DOWNLOAD_BYTES + 20))
+            text = self.contacts.read_obex_download(blob)
+            self.assertEqual(len(text.encode()), self.contacts.MAX_DOWNLOAD_BYTES)
+
 
 class CliParserTests(unittest.TestCase):
     def test_every_command_parses(self):
@@ -399,6 +431,23 @@ class HistoryTests(unittest.TestCase):
                 self.c.record_call("dialed", "123", "", f"2026-09-30T10:00:{i % 60:02d}", path)
             self.assertEqual(len(self.c.load_calllog(path)), self.c.CALLLOG_MAX)
             self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+            self.c.record_call("dialed", "1" * 200, "N" * 500, "2026-09-30T10:00:00" + "x" * 40, path)
+            saved = self.c.load_calllog(path)[0]
+            self.assertEqual(len(saved["number"]), self.c.MAX_NUMBER)
+            self.assertEqual(len(saved["name"]), self.c.MAX_NAME)
+            self.assertLessEqual(len(saved["time"]), 40)
+            self.c.record_call("not-a-call", "1", "x", "2026-09-30T10:00:00", path)
+            self.assertEqual(self.c.load_calllog(path)[0]["name"], saved["name"])
+
+    def test_history_keeps_only_the_newest_cap(self):
+        cards = []
+        for i in range(self.c.MAX_HISTORY + 10):
+            cards.append(
+                "BEGIN:VCARD\nTEL:+1555%07d\nX-IRMC-CALL-DATETIME;MISSED:20260101T%06d\nEND:VCARD\n" % (i, i)
+            )
+        entries = self.c.parse_history("".join(cards))
+        self.assertEqual(len(entries), self.c.MAX_HISTORY)
+        self.assertTrue(entries[0]["time"].startswith("2026-01-01T"))
 
     def test_mark_seen(self):
         with tempfile.TemporaryDirectory() as tmp:
