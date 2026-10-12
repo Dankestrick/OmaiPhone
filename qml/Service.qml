@@ -341,6 +341,9 @@ Item {
       root.loadThreads()
       if (root.activeThread && event.message && event.message.thread === root.activeThread)
         root.loadMessages(root.activeThread)
+    } else if (event.event === "open-thread") {
+      // openMessages takes the number or email. address_from_thread already stripped tel: or email:.
+      root.openMessages(String(event.address || ""), String(event.label || ""))
     } else if (event.event === "devices") {
       root.fill(deviceModel, event.devices, ["address", "name", "paired", "connected"])
       root.deviceRevision += 1

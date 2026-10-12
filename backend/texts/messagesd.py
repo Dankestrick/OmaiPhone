@@ -67,13 +67,15 @@ def notification_text(value: str, limit: int, keep_newlines: bool = False) -> st
     )
 
 
-def notification_argv(title: str, body: str) -> list[str]:
-    """notify-send arguments. `--` keeps a hostile title from being an option."""
+def notification_content(title: str, body: str) -> tuple[str, str]:
+    """Plain title and escaped body for one pop-up.
+
+    Omarchy shows the title as plain text, so escaping it would show
+    "&amp;" on screen. The body is markup.
+    """
     safe_title = _plain_title(title, 80) or "New message"
-    args = ["notify-send", "--app-name=Messages", "--urgency=normal", "--", safe_title]
-    if body:
-        args.append(notification_text(body, 120, keep_newlines=True))
-    return args
+    safe_body = notification_text(body, 120, keep_newlines=True) if body else ""
+    return safe_title, safe_body
 
 
 def log_state(state: str) -> None:
@@ -105,31 +107,308 @@ def status_from_store(store: Store, ready: bool, detail: str) -> dict:
     }
 
 
-# A burst of texts must not start a notify-send for every one of them.
-_notify_running = 0
+# org.freedesktop.Notifications. A click in Omarchy invokes the "default" action.
+_NOTIFY_NAME = "org.freedesktop.Notifications"
+_NOTIFY_PATH = "/org/freedesktop/Notifications"
+_BUS_NAME = "org.freedesktop.DBus"
+_BUS_PATH = "/org/freedesktop/DBus"
+# A burst of texts must not put a Notify call in flight for every one of them.
 _NOTIFY_LIMIT = 2
+_NOTIFY_TIMEOUT = 5
+# Ids this program created. Closed ones are dropped; the rest stay bounded.
+_POPUP_LIMIT = 50
+
+_MATCH_ACTION = (
+    "type='signal',sender='org.freedesktop.Notifications',"
+    "interface='org.freedesktop.Notifications',"
+    "path='/org/freedesktop/Notifications',member='ActionInvoked'"
+)
+_MATCH_CLOSED = (
+    "type='signal',sender='org.freedesktop.Notifications',"
+    "interface='org.freedesktop.Notifications',"
+    "path='/org/freedesktop/Notifications',member='NotificationClosed'"
+)
+_MATCH_OWNER = (
+    "type='signal',sender='org.freedesktop.DBus',"
+    "interface='org.freedesktop.DBus',path='/org/freedesktop/DBus',"
+    "member='NameOwnerChanged',arg0='org.freedesktop.Notifications'"
+)
+
+_dbus = None
 
 
-async def notify(title: str, body: str) -> None:
-    """Desktop notification. The title is a name, never a phone number."""
-    global _notify_running
-    if _notify_running >= _NOTIFY_LIMIT:
-        return
-    _notify_running += 1
-    try:
-        proc = await asyncio.create_subprocess_exec(
-            *notification_argv(title, body),
-            stdout=asyncio.subprocess.DEVNULL,
-            stderr=asyncio.subprocess.DEVNULL,
-        )
+def _dbus_types():
+    global _dbus
+    if _dbus is None:
+        from dbus_next import Message, Variant
+        from dbus_next.constants import MessageType
+
+        _dbus = (Message, Variant, MessageType)
+    return _dbus
+
+
+def _clip(value, limit: int) -> str:
+    if not isinstance(value, str):
+        return ""
+    return value.replace("\x00", "")[:limit]
+
+
+def _notification_id(value) -> int | None:
+    """A Notify id is a positive uint32. Booleans are ints in Python and are not ids."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return None
+    if value <= 0 or value > 0xFFFFFFFF:
+        return None
+    return value
+
+
+def _unique_name(value) -> str:
+    """A connection's unique bus name (`:1.42`). Well-known names do not count."""
+    if not isinstance(value, str) or not value.startswith(":") or len(value) > 255:
+        return ""
+    return value
+
+
+def notification_message(title: str, body: str):
+    """One Notify call. The phone's text is a D-Bus string, never a command argument."""
+    Message, Variant, _message_type = _dbus_types()
+    summary, text = notification_content(title, body)
+    return Message(
+        destination=_NOTIFY_NAME,
+        path=_NOTIFY_PATH,
+        interface=_NOTIFY_NAME,
+        member="Notify",
+        signature="susssasa{sv}i",
+        body=[
+            "Messages",
+            0,
+            "",
+            summary,
+            text,
+            ["default", "Open"],
+            {"urgency": Variant("y", 1)},
+            -1,
+        ],
+    )
+
+
+class PopupClicks:
+    """Which notification ids this program created, and what a click should open.
+
+    ActionInvoked is a session-bus signal. A signal addressed to this
+    connection is delivered even when it matches no rule, so the sender has
+    to be checked here. Only the current owner of the notification name is
+    accepted, and only for an id Notify returned to us.
+    """
+
+    def __init__(self):
+        self.owner = ""
+        self._ids: dict[int, dict] = {}
+
+    @property
+    def tracked(self) -> int:
+        return len(self._ids)
+
+    def set_owner(self, owner: str) -> None:
+        if not isinstance(owner, str):
+            owner = ""
+        if owner == self.owner:
+            return
+        self.owner = owner
+        self._ids.clear()
+
+    def remember(self, notification_id: int, thread: str, address: str, label: str) -> None:
+        nid = _notification_id(notification_id)
+        if nid is None:
+            return
+        self._ids.pop(nid, None)
+        self._ids[nid] = {
+            "thread": _clip(thread, 240),
+            "address": _clip(address, 200),
+            "label": _clip(label, 200),
+        }
+        while len(self._ids) > _POPUP_LIMIT:
+            self._ids.pop(next(iter(self._ids)))
+
+    def on_closed(self, sender: str, notification_id: int) -> None:
+        if not self.owner or sender != self.owner:
+            return
+        nid = _notification_id(notification_id)
+        if nid is None:
+            return
+        self._ids.pop(nid, None)
+
+    def on_action(self, sender: str, notification_id: int, action: str) -> dict | None:
+        if not self.owner or sender != self.owner or action != "default":
+            return None
+        nid = _notification_id(notification_id)
+        if nid is None:
+            return None
+        found = self._ids.get(nid)
+        if not found:
+            return None
+        return dict(found)
+
+
+class TextPopups:
+    """Desktop pop-ups for new texts, and the click that opens one conversation."""
+
+    def __init__(self, emit):
+        self._emit = emit
+        self.clicks = PopupClicks()
+        self._bus = None
+        self._in_flight = 0
+        self._MessageType = None
+
+    async def attach(self, bus) -> None:
+        """Listen on the texts session bus. A missing bus means no pop-ups."""
+        if bus is None or self._bus is not None:
+            return
         try:
-            await asyncio.wait_for(proc.wait(), timeout=5)
-        except TimeoutError:
-            proc.kill()
-    except FileNotFoundError:
-        return
-    finally:
-        _notify_running -= 1
+            _message, _variant, self._MessageType = _dbus_types()
+        except Exception:
+            return
+        self._bus = bus
+        try:
+            bus.add_message_handler(self._on_message)
+        except Exception:
+            pass
+        try:
+            await self._subscribe()
+        except Exception:
+            return
+
+    async def notify(
+        self, title: str, body: str, thread: str = "", address: str = "", label: str = ""
+    ) -> None:
+        """Show one pop-up. A D-Bus failure shows nothing and does not raise."""
+        if self._bus is None or self._in_flight >= _NOTIFY_LIMIT:
+            return
+        self._in_flight += 1
+        try:
+            reply = await self._call(notification_message(title, body))
+            self._remember(reply, thread, address, label)
+        except Exception:
+            return
+        finally:
+            self._in_flight -= 1
+
+    async def _subscribe(self) -> None:
+        for rule in (_MATCH_ACTION, _MATCH_CLOSED, _MATCH_OWNER):
+            try:
+                await self._call(self._bus_message("AddMatch", "s", [rule]))
+            except Exception:
+                continue
+        try:
+            reply = await self._call(self._bus_message("GetNameOwner", "s", [_NOTIFY_NAME]))
+        except Exception:
+            return
+        self._take_owner(reply)
+
+    def _bus_message(self, member: str, signature: str, body: list):
+        Message, _variant, _message_type = _dbus_types()
+        return Message(
+            destination=_BUS_NAME,
+            path=_BUS_PATH,
+            interface=_BUS_NAME,
+            member=member,
+            signature=signature,
+            body=body,
+        )
+
+    async def _call(self, msg):
+        return await asyncio.wait_for(self._bus.call(msg), _NOTIFY_TIMEOUT)
+
+    def _take_owner(self, reply) -> None:
+        if reply is None or reply.message_type != self._MessageType.METHOD_RETURN:
+            return
+        if reply.sender != _BUS_NAME or reply.signature != "s" or not reply.body:
+            return
+        owner = _unique_name(reply.body[0])
+        if owner:
+            self.clicks.set_owner(owner)
+
+    def _remember(self, reply, thread: str, address: str, label: str) -> None:
+        if reply is None or reply.message_type != self._MessageType.METHOD_RETURN:
+            return
+        if reply.signature != "u" or not reply.body:
+            return
+        sender = _unique_name(reply.sender)
+        if not sender:
+            return
+        # The bus routed Notify to the current owner. Learn that name only
+        # when GetNameOwner has not already told us who it is.
+        if not self.clicks.owner:
+            self.clicks.set_owner(sender)
+        if sender != self.clicks.owner:
+            return
+        nid = _notification_id(reply.body[0])
+        if nid is None:
+            return
+        self.clicks.remember(nid, thread, address, label)
+
+    def _on_message(self, msg):
+        try:
+            if self._MessageType is None or msg.message_type != self._MessageType.SIGNAL:
+                return None
+            self._on_signal(msg)
+        except Exception:
+            return None
+        return None
+
+    def _on_signal(self, msg) -> None:
+        if (
+            msg.member == "NameOwnerChanged"
+            and msg.interface == _BUS_NAME
+            and msg.path == _BUS_PATH
+            and msg.sender == _BUS_NAME
+        ):
+            self._name_owner_changed(msg)
+            return
+        if msg.interface != _NOTIFY_NAME or msg.path != _NOTIFY_PATH:
+            return
+        if not self.clicks.owner or msg.sender != self.clicks.owner:
+            return
+        if msg.member == "ActionInvoked":
+            self._action_invoked(msg)
+        elif msg.member == "NotificationClosed":
+            self._notification_closed(msg)
+
+    def _name_owner_changed(self, msg) -> None:
+        if msg.signature != "sss" or len(msg.body) != 3:
+            return
+        name, _old, new = msg.body
+        if name != _NOTIFY_NAME or not isinstance(new, str):
+            return
+        if new == "":
+            self.clicks.set_owner("")
+            return
+        owner = _unique_name(new)
+        if owner:
+            self.clicks.set_owner(owner)
+
+    def _action_invoked(self, msg) -> None:
+        if msg.signature != "us" or len(msg.body) != 2:
+            return
+        action = msg.body[1]
+        if not isinstance(action, str):
+            return
+        opened = self.clicks.on_action(msg.sender, msg.body[0], action)
+        if not opened:
+            return
+        self._emit(
+            {
+                "event": "open-thread",
+                "thread": opened["thread"],
+                "address": opened["address"],
+                "label": opened["label"],
+            }
+        )
+
+    def _notification_closed(self, msg) -> None:
+        if msg.signature != "uu" or not msg.body:
+            return
+        self.clicks.on_closed(msg.sender, msg.body[0])
 
 
 async def handle(raw: str, store: Store, session) -> None:
@@ -243,29 +522,37 @@ async def dispatch(name: str, command: dict, store: Store, session) -> None:
     raise ValueError("Unknown command.")
 
 
-def notifying_emit(store: Store, inner):
+def notifying_emit(store: Store, inner, popups: TextPopups):
     """Wrap emit so a new inbound text can raise a name-only notification."""
 
     def _emit(event: dict) -> None:
         inner(event)
         if event.get("event") == "status":
             log_state(str(event.get("status", {}).get("state") or ""))
-        if event.get("event") == "message" and event.get("notify"):
-            message = event.get("message") or {}
-            title = notification_title(str(message.get("label") or ""))
-            body = ""
-            if store.settings()["notifyBody"]:
-                body = str(message.get("body") or "")
-            spawn(notify(title, body))
+        if event.get("event") != "message" or not event.get("notify"):
+            return
+        message = event.get("message") or {}
+        if not isinstance(message, dict):
+            return
+        label = message.get("label") if isinstance(message.get("label"), str) else ""
+        thread = message.get("thread") if isinstance(message.get("thread"), str) else ""
+        title = notification_title(label)
+        body = ""
+        if store.settings()["notifyBody"]:
+            raw_body = message.get("body")
+            body = raw_body if isinstance(raw_body, str) else ""
+        # openMessages takes the number or email that address_from_thread pulls out of the key.
+        spawn(popups.notify(title, body, thread, address_from_thread(thread), label))
 
     return _emit
 
 
 async def amain_wrapped() -> None:
     store = Store()
+    popups = TextPopups(emit)
     session = None
     detail = ""
-    emit_fn = notifying_emit(store, emit)
+    emit_fn = notifying_emit(store, emit, popups)
     try:
         from bluetooth import BluetoothSession
 
@@ -275,6 +562,13 @@ async def amain_wrapped() -> None:
         detail = public_error(exc)
         print("bluetooth unavailable", file=sys.stderr, flush=True)
         session = None
+    else:
+        # The texts session bus is already up. A pop-up failure must not
+        # take messaging down with it.
+        try:
+            await popups.attach(session._session_bus)
+        except Exception:
+            pass
     if session is None:
         ready = status_from_store(store, False, detail or "Bluetooth messaging is not available yet.")
         emit({"event": "ready", "status": ready})
