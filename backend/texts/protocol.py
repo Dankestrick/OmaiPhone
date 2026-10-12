@@ -237,10 +237,15 @@ def extract_bmessage_text(raw: str) -> str:
     """Pull the plain text out of a downloaded bMessage, ignoring attachments."""
     if not raw:
         return ""
+    # The download reader already refuses a huge file. This is the second gate
+    # for a caller that already has the text in memory.
+    if len(raw) > _PRESENT_SCAN * 4:
+        raw = raw[:_PRESENT_SCAN * 4]
     match = re.search(r"BEGIN:MSG\r?\n(.*?)\r?\nEND:MSG", raw, flags=re.DOTALL | re.IGNORECASE)
     if not match:
         return ""
-    return match.group(1).replace("\r\n", "\n").replace("\r", "\n").strip()
+    text = match.group(1).replace("\r\n", "\n").replace("\r", "\n").strip()
+    return text[:_PRESENT_SCAN]
 
 
 def looks_like_attachment_payload(text: str) -> bool:
@@ -260,6 +265,11 @@ def looks_like_attachment_payload(text: str) -> bool:
     return False
 
 
+# Shown text is short. Scanning a multi-megabyte body for a base64 run
+# would copy the whole thing.
+_PRESENT_SCAN = 8000
+
+
 def present_message(body: str, has_attachment: bool) -> str:
     """Text the overlay is allowed to show.
 
@@ -267,6 +277,8 @@ def present_message(body: str, has_attachment: bool) -> str:
     attached, the transcript keeps the words and adds one plain line.
     """
     text = (body or "").replace("\r\n", "\n").replace("\r", "\n").strip()
+    if len(text) > _PRESENT_SCAN:
+        text = text[:_PRESENT_SCAN]
     if looks_like_attachment_payload(text):
         text = ""
         has_attachment = True

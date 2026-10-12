@@ -104,6 +104,17 @@ class AttachmentTests(unittest.TestCase):
     def test_image_only_message_is_a_placeholder(self):
         self.assertEqual(protocol.present_message("", True), "attachment omitted")
 
+    def test_a_huge_body_is_cut_before_it_is_scanned(self):
+        shown = protocol.present_message("!" * (protocol._PRESENT_SCAN + 50), False)
+        self.assertEqual(len(shown), protocol._PRESENT_SCAN)
+        raw = (
+            "BEGIN:MSG\r\n"
+            + ("B" * (protocol._PRESENT_SCAN + 10))
+            + "\r\nEND:MSG\r\n"
+            + ("C" * (protocol._PRESENT_SCAN * 4))
+        )
+        self.assertEqual(len(protocol.extract_bmessage_text(raw)), protocol._PRESENT_SCAN)
+
 
 class VCardTests(unittest.TestCase):
     def test_reads_name_phone_and_email(self):
