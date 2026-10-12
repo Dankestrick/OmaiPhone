@@ -29,6 +29,18 @@ class IncomingPathTests(unittest.TestCase):
         ):
             self.assertIsNone(bluetooth.incoming_bmessage_path(root, handle), handle)
 
+    def test_a_hostile_handle_or_listing_does_not_grow(self):
+        huge = "H" * 100000
+        self.assertEqual(bluetooth._handle_from("/org/bluez/obex/session0/message2a", {"Handle": huge}), "2a")
+        self.assertEqual(bluetooth._handle_from("/org/bluez/obex/session0/message2a", {"Handle": "ab"}), "ab")
+        self.assertEqual(bluetooth._handle_token(10 ** 80), "")
+        listing = {
+            f"/org/bluez/obex/s/message{i}": {"Handle": str(i)}
+            for i in range(bluetooth._MAX_LISTING + 25)
+        }
+        self.assertEqual(len(bluetooth._listing_entries(listing)), bluetooth._MAX_LISTING)
+        self.assertEqual(bluetooth._map_time("20261002T103000" + "9" * 5000), "2026-10-02T10:30:00")
+
     def test_oversized_download_is_not_parsed(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "incoming-1.bmsg"
