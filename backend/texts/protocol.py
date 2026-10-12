@@ -362,9 +362,20 @@ def public_error(exc: BaseException) -> str:
         return "Bluetooth messaging is not running. Install bluez-obex and make sure Bluetooth is on."
     if "org.bluez.error.authentication" in lowered or "authentication" in lowered and "cancel" in lowered:
         return "Pairing was cancelled."
-    # Keep a short class name when the text might contain a device path.
+    # Keep a short class name when the text might contain a device path,
+    # a phone number, or message text. The fallback is shown in the overlay.
     name = type(exc).__name__
-    if len(text) > 160 or "BEGIN:MSG" in text or "BEGIN:VCARD" in text:
-        return f"Bluetooth error ({name})."
     one_line = " ".join(text.split())
-    return one_line or f"Bluetooth error ({name})."
+    digits = sum(ch.isdigit() for ch in one_line)
+    safe = (
+        0 < len(one_line) <= 160
+        and digits < 6
+        and "@" not in one_line
+        and "/" not in one_line
+        and "<" not in one_line
+        and ">" not in one_line
+        and "BEGIN:" not in one_line.upper()
+    )
+    if not safe:
+        return f"Bluetooth error ({name})."
+    return one_line
