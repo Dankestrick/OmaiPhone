@@ -411,6 +411,20 @@ class TextPopups:
         self.clicks.on_closed(msg.sender, msg.body[0])
 
 
+def _clear_phone_alerts(store, thread: str, address: str = "") -> None:
+    """The phone still shows a text after it is read here. Clear that person's alert.
+
+    A failure (mirroring off, phone away, service not running) is ignored so
+    the Messages card does not show an error for it.
+    """
+    try:
+        from seen import clear_conversation
+
+        clear_conversation(store, thread, address)
+    except Exception:
+        return
+
+
 async def handle(raw: str, store: Store, session) -> None:
     try:
         command = json.loads(raw)
@@ -478,6 +492,7 @@ async def dispatch(name: str, command: dict, store: Store, session) -> None:
         else:
             store.mark_thread_read(key)
             emit({"event": "threads", "threads": store.threads()})
+        _clear_phone_alerts(store, key)
         return
 
     if session is None:
@@ -517,6 +532,7 @@ async def dispatch(name: str, command: dict, store: Store, session) -> None:
             raise ValueError("Choose a contact or a conversation first.")
         await session.send(address, body)
         emit({"event": "sent", "thread": str(command.get("thread") or "")})
+        _clear_phone_alerts(store, str(command.get("thread") or ""), address)
         return
 
     raise ValueError("Unknown command.")
