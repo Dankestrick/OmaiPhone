@@ -97,6 +97,55 @@ class AttClientTests(unittest.TestCase):
         self.assertTrue(answers[0].needs_permission)
         self.assertEqual(str(answers[0]), "insufficient authorization")
 
+    def test_discovery_stops_when_the_phone_does_not_advance(self):
+        sent, done = [], []
+
+        def send(pdu):
+            sent.append(pdu)
+            if len(sent) > 2:
+                raise AssertionError("discovery kept requesting")
+            # End handle 0 is behind the start handle, so the next request would repeat.
+            client.feed(bytes([att.OP_READ_BY_GROUP_RSP, 6]) + struct.pack("<HHH", 1, 0, 0x1800))
+
+        client = att.AttClient(send)
+        client.discover_services(lambda services, error: done.append((services, error)))
+        self.assertEqual(len(sent), 1)
+        self.assertIsNone(done[0][0])
+        self.assertIsInstance(done[0][1], ValueError)
+
+    def test_discovery_follows_one_advancing_range(self):
+        sent, done = [], []
+
+        def send(pdu):
+            sent.append(pdu)
+            start = struct.unpack_from("<H", pdu, 1)[0]
+            if start == 1:
+                client.feed(bytes([att.OP_READ_BY_GROUP_RSP, 6]) + struct.pack("<HHH", 1, 5, 0x1800))
+            else:
+                client.feed(att.error_response(att.OP_READ_BY_GROUP_REQ, start, att.ERR_ATTRIBUTE_NOT_FOUND))
+
+        client = att.AttClient(send)
+        client.discover_services(lambda services, error: done.append((services, error)))
+        self.assertEqual([struct.unpack_from("<H", pdu, 1)[0] for pdu in sent], [1, 6])
+        self.assertIsNone(done[0][1])
+        self.assertEqual(done[0][0], [(1, 5, att.BASE_UUID % 0x1800)])
+
+    def test_characteristic_discovery_stops_when_the_handle_does_not_advance(self):
+        sent, done = [], []
+
+        def send(pdu):
+            sent.append(pdu)
+            if len(sent) > 2:
+                raise AssertionError("discovery kept requesting")
+            # Declaration handle 0 does not move the cursor past the start handle.
+            client.feed(bytes([att.OP_READ_BY_TYPE_RSP, 7]) + struct.pack("<HBHH", 0, 0x02, 2, 0x2A00))
+
+        client = att.AttClient(send)
+        client.discover_characteristics(1, 20, lambda chars, error: done.append((chars, error)))
+        self.assertEqual(len(sent), 1)
+        self.assertIsNone(done[0][0])
+        self.assertIsInstance(done[0][1], ValueError)
+
     def test_fail_pending_releases_everyone(self):
         answers = []
         client = att.AttClient(lambda pdu: None)
