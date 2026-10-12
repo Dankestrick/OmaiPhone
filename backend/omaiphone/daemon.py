@@ -11,7 +11,7 @@ import subprocess
 
 from gi.repository import Gio, GLib
 
-from . import audio, contacts, phone
+from . import audio, bluez, contacts, phone
 from .control import Control
 from .events import ag_path_of
 from .mirror import Mirror, Toaster
@@ -97,10 +97,13 @@ class Daemon:
     def start(self):
         try:
             for path, ifaces in self.tel.gateways():
-                self.addresses[path] = ifaces["org.pipewire.Telephony.AudioGateway1"].get("Address", "")
-                log(f"phone connected: {path}")
+                address = ifaces["org.pipewire.Telephony.AudioGateway1"].get("Address", "")
+                if self._ours(path, address):
+                    self.addresses[path] = address
+                    log(f"phone connected: {path}")
             for call in self.tel.calls():
-                self._adopt(call["path"], call["state"], call["number"], call["name"])
+                if ag_path_of(call["path"]) in self.addresses:
+                    self._adopt(call["path"], call["state"], call["number"], call["name"])
             if self.addresses:
                 if not self.calls:
                     self._calls_stay_on_phone()
@@ -143,8 +146,20 @@ class Daemon:
 
     # ---- events -----------------------------------------------------------------
 
+    def _ours(self, ag_path, address):
+        """Only the saved iPhone is handled; any other phone that connects is ignored."""
+        if bluez.is_pinned(address):
+            return True
+        log(f"ignoring {ag_path}: not the saved iPhone")
+        return False
+
     def on_event(self, event):
         kind = event["type"]
+        if kind == "phone-connected" and not self._ours(event["path"], event.get("address", "")):
+            return
+        if kind in ("call-added", "call-state", "caller-id", "call-removed") \
+                and ag_path_of(event["path"]) not in self.addresses:
+            return  # a call on another phone
         if kind == "phone-connected":
             self.addresses[event["path"]] = event.get("address", "")
             log(f"phone connected: {event['path']}")
@@ -182,6 +197,9 @@ class Daemon:
 
     def _calls_stay_on_phone(self, address=None):
         """Default: refuse the phone's voice link so iPhone-side calls stay there."""
+        address = address or next((a for a in self.addresses.values() if a), None)
+        if not address:
+            return
         try:
             self.tel.set_reject_sco(True, address)
         except TelephonyError as error:
@@ -336,9 +354,11 @@ class Daemon:
             return  # disabled by the user: omaiphone notifications off
         info = self.calls[path]
         title = "Incoming call"
-        body = info["name"] or info["number"] or "Unknown caller"
-        if info["name"] and info["number"]:
-            body = f"{info['name']}\n{info['number']}"
+        # The pop-up shows markup and links, and the name comes from the phone.
+        name, number = GLib.markup_escape_text(info["name"] or ""), GLib.markup_escape_text(info["number"] or "")
+        body = name or number or "Unknown caller"
+        if name and number:
+            body = f"{name}\n{number}"
         # Omarchy's notification popups have no buttons; a click invokes the
         # "default" action. Answer/Decline buttons live in the bar panel.
         body += "\nClick to answer · Decline in the iPhone panel"
@@ -366,7 +386,7 @@ class Daemon:
         """
         if self.notification_id:
             info = self.calls.get(self.notification_call) or {}
-            who = info.get("name") or info.get("number") or "Unknown caller"
+            who = GLib.markup_escape_text(info.get("name") or info.get("number") or "Unknown caller")
             title, urgency, timeout = (outcome, 1, 6000) if outcome else ("Call ended", 0, 3000)
             if outcome == "Call answered":
                 urgency, timeout = 0, 3000

@@ -2,6 +2,8 @@
 
 from gi.repository import Gio, GLib
 
+from . import audio
+
 BLUEZ = "org.bluez"
 DEVICE_IFACE = "org.bluez.Device1"
 ADAPTER_IFACE = "org.bluez.Adapter1"
@@ -89,12 +91,55 @@ def devices(bus, phones_only=False):
     return sorted(result, key=lambda d: (not d["connected"], not d["paired"], d["name"].lower()))
 
 
+def pinned_address(config=None):
+    """The address of the iPhone this PC belongs to, or "" before one is saved."""
+    config = audio.load_config() if config is None else config
+    return str(config.get("phoneAddress") or "")
+
+
+def pin(device):
+    """Remember device as the iPhone. Every other phone is left alone from now on."""
+    config = audio.load_config()
+    if pinned_address(config).lower() != device["address"].lower():
+        config["phoneAddress"] = device["address"]
+        audio.save_config(config)
+
+
+def is_pinned(address, bus=None):
+    """True when address belongs to the saved iPhone (saving it first if it is the only one)."""
+    if not address:
+        return False
+    try:
+        return find_phone(bus or system_bus())["address"].lower() == address.lower()
+    except BluetoothError:
+        return False
+
+
 def find_phone(bus, address=None):
+    """The saved iPhone. With address, that paired phone (the caller pins it).
+
+    Before an iPhone is saved, the only paired phone is saved on first use. With
+    several paired phones nothing is guessed: another phone must never get the
+    calls, texts or contacts.
+    """
     phones = [d for d in devices(bus, phones_only=True) if d["paired"]]
     if address:
         phones = [d for d in phones if d["address"].lower() == address.lower()]
+        if not phones:
+            raise BluetoothError(f"no paired phone with address {address}")
+        return phones[0]
+    saved = pinned_address()
+    if saved:
+        for d in phones:
+            if d["address"].lower() == saved.lower():
+                return d
+        raise BluetoothError("the saved iPhone is not paired any more - run: omaiphone-ctl pair")
     if not phones:
         raise BluetoothError("no paired iPhone found - run: omaiphone-ctl pair")
+    if len(phones) > 1:
+        raise BluetoothError("more than one phone is paired - pick yours: omaiphone-ctl connect <address> "
+                             "(addresses: omaiphone-ctl devices)")
+    pin(phones[0])
     return phones[0]
 
 
@@ -156,10 +201,9 @@ class PairingAgent:
             else:
                 self._reject(invocation)
         elif method == "RequestAuthorization":
-            if self.confirm(self._device_name(args[0]), None):
-                invocation.return_value(None)
-            else:
-                self._reject(invocation)
+            # "Just Works" pairing has no code to compare, so anyone nearby
+            # could pose as the phone. iPhones always pair with a code.
+            self._reject(invocation)
         elif method == "AuthorizeService":
             device, uuid = args
             paired = any(d["path"] == device and d["paired"] for d in devices(self.bus))

@@ -68,16 +68,15 @@ def collect_status(mask_numbers=False):
         path, props = bluez.adapter(sysbus)
         status["bluetooth"] = {"adapter": path.rsplit("/", 1)[-1], "powered": bool(props.get("Powered")),
                                "address": props.get("Address", "")}
-        phones = [d for d in bluez.devices(sysbus, phones_only=True) if d["paired"]]
-        if phones:
-            status["phone"] = phones[0]
+        if any(d["paired"] for d in bluez.devices(sysbus, phones_only=True)):
+            status["phone"] = bluez.find_phone(sysbus)
     except bluez.BluetoothError as error:
         status["errors"].append(str(error))
 
     try:
         tel = Telephony()
         address = status["phone"]["address"] if status["phone"] else None
-        ag_path, ifaces = tel.gateway(address)
+        ag_path, ifaces = tel.gateway(address) if address else (None, None)  # never another phone's calls
         if ag_path:
             status["hfp"] = True
             ag = ifaces["org.pipewire.Telephony.AudioGateway1"]
@@ -204,8 +203,19 @@ def mirror_summary(mirror):
 
 # ---- helpers ----------------------------------------------------------------------
 
+class PhoneTelephony(Telephony):
+    """Telephony bound to the saved iPhone, so an action never reaches another phone."""
+
+    def __init__(self):
+        super().__init__()
+        self.phone = bluez.find_phone(bluez.system_bus())["address"]
+
+    def require_gateway(self, address=None):
+        return super().require_gateway(address or self.phone)
+
+
 def telephony_and_calls():
-    tel = Telephony()
+    tel = PhoneTelephony()
     ag_path, _ = tel.require_gateway()
     return tel, ag_path, tel.calls(ag_path)
 
@@ -245,6 +255,8 @@ def cmd_connect(args):
     device = bluez.find_phone(bus, args.address)
     print(f"Connecting to {device['name']} (HFP)...")
     bluez.connect(bus, device)
+    if args.address:
+        bluez.pin(device)  # the phone picked by hand becomes the iPhone
     tel = Telephony()
     loop = GLib.MainLoop()
     found = {"ok": tel.gateway(device["address"])[0] is not None}
@@ -270,7 +282,7 @@ def cmd_disconnect(args):
 
 def cmd_call(args):
     number = phone.normalize(args.number)
-    tel = Telephony()
+    tel = PhoneTelephony()
     tel.set_reject_sco(False)  # this call belongs to the PC: accept its audio
     tel.dial(number)
     audio.write_private(LAST_NUMBER_FILE, number)
@@ -283,7 +295,8 @@ def cmd_redial(_args):
             number = handle.read().strip()
     except FileNotFoundError:
         raise UserError("no number has been dialed from this PC yet")
-    tel = Telephony()
+    number = phone.normalize(number)
+    tel = PhoneTelephony()
     tel.set_reject_sco(False)
     tel.dial(number)
     print(f"Dialing {number} ...")
@@ -525,7 +538,7 @@ def cmd_history(args):
 def cmd_volume(args):
     if not 0 <= args.percent <= 100:
         raise UserError("volume must be between 0 and 100")
-    Telephony().set_speaker_volume(round(args.percent * 15 / 100))
+    PhoneTelephony().set_speaker_volume(round(args.percent * 15 / 100))
     print(f"Call volume set to {args.percent}%.")
 
 
@@ -548,6 +561,7 @@ def cmd_pair(args):
     agent = bluez.PairingAgent(bus, confirm)
     agent.register()
     before = {d["address"] for d in bluez.devices(bus) if d["paired"]}
+    was_pairable = bool(props.get("Pairable"))
     bluez.set_property(bus, adapter_path, bluez.ADAPTER_IFACE, "Pairable", GLib.Variant("b", True))
     bluez.set_property(bus, adapter_path, bluez.ADAPTER_IFACE, "DiscoverableTimeout", GLib.Variant("u", args.timeout))
     bluez.set_property(bus, adapter_path, bluez.ADAPTER_IFACE, "Discoverable", GLib.Variant("b", True))
@@ -573,6 +587,9 @@ def cmd_pair(args):
     finally:
         try:
             bluez.set_property(bus, adapter_path, bluez.ADAPTER_IFACE, "Discoverable", GLib.Variant("b", False))
+            if not was_pairable:
+                # Left pairable, other devices could keep asking to pair later.
+                bluez.set_property(bus, adapter_path, bluez.ADAPTER_IFACE, "Pairable", GLib.Variant("b", False))
         except bluez.BluetoothError:
             pass
         agent.unregister()
@@ -580,7 +597,11 @@ def cmd_pair(args):
     device = result["device"]
     if not device:
         raise UserError("no new device was paired")
+    if not device["phone"]:
+        raise UserError(f"{device['name']} paired, but it is not a phone; it was not saved as the iPhone "
+                        "(remove it in the Bluetooth settings if it should not be there)")
     bluez.set_property(bus, device["path"], bluez.DEVICE_IFACE, "Trusted", GLib.Variant("b", True))
+    bluez.pin(device)
     print(f"Paired and trusted: {device['name']} ({device['address']})")
     print("Next: omaiphone-ctl connect")
 
