@@ -71,6 +71,10 @@ class Session:
         """Call every few seconds. Returns False once the link should be dropped."""
         now = self._clock()
         if self._current and now > self._current[2]:
+            kind, key, _deadline = self._current
+            # An app name that never arrives must not leave its notifications queued.
+            if kind == "app":
+                self._app_named(key, "")
             self._finish_command()    # the phone never sent the details; move on
         if self.att.busy and self._last_sent is not None and now - self._last_sent > REQUEST_TIMEOUT:
             self._fail("the phone stopped answering")
@@ -220,8 +224,7 @@ class Session:
         if event["event"] == "removed":
             self._events.pop(uid, None)
             self._commands = [c for c in self._commands if c[:2] != ("attributes", uid)]
-            for held in self._waiting.values():
-                held[:] = [n for n in held if n["uid"] != uid]
+            self._drop_waiting(uid)
             self.on_removed(uid)
             return
         # Reinsert so an update counts as newest and eviction always moves forward.
@@ -231,6 +234,7 @@ class Session:
             oldest = next(iter(self._events))
             self._events.pop(oldest, None)
             self._commands = [c for c in self._commands if c[:2] != ("attributes", oldest)]
+            self._drop_waiting(oldest)
             self.on_removed(oldest)
         if ("attributes", uid) not in [c[:2] for c in self._commands] and len(self._commands) < MAX_QUEUED:
             self._commands.append(("attributes", uid, ancs.get_notification_attributes(uid)))
@@ -299,6 +303,8 @@ class Session:
         if event is None:
             return   # removed on the phone while its details were on the way
         app_id = attributes.get(ancs.ATTR_APP_ID, "")
+        if not isinstance(app_id, str):
+            app_id = ""
         notification = {
             "uid": uid,
             "appId": app_id,
@@ -316,11 +322,29 @@ class Session:
         }
         if app_id in self._app_names:
             return self.on_notification(notification)
-        first = app_id not in self._waiting
-        self._waiting.setdefault(app_id, []).append(notification)
-        if first:
+        if app_id not in self._waiting and len(self._waiting) >= MAX_TRACKED:
+            notification["app"] = fallback_app_name(app_id)
+            return self.on_notification(notification)
+        notes = self._waiting.setdefault(app_id, [])
+        if len(notes) >= MAX_TRACKED:
+            notification["app"] = fallback_app_name(app_id)
+            return self.on_notification(notification)
+        notes.append(notification)
+        if len(notes) > 1:
+            return
+        if len(self._commands) >= MAX_QUEUED:
+            self._app_named(app_id, "")
+        else:
             self._commands.insert(0, ("app", app_id, ancs.get_app_attributes(app_id)))
-            self._next_command()
+        self._next_command()
+
+    def _drop_waiting(self, uid):
+        for app_id in list(self._waiting):
+            notes = [n for n in self._waiting[app_id] if n["uid"] != uid]
+            if notes:
+                self._waiting[app_id] = notes
+            else:
+                del self._waiting[app_id]
 
     def _app_named(self, app_id, name):
         self._app_names.pop(app_id, None)

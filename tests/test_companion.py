@@ -459,6 +459,43 @@ class SessionTests(unittest.TestCase):
         pump()                                                # the late details for 1 arrive before those for 2
         self.assertEqual([n["uid"] for n in recorder.notifications], [2])
 
+    def test_an_app_name_that_never_arrives_is_released(self):
+        from omaiphone.companion import COMMAND_TIMEOUT, Session
+        seen = []
+        now = {"t": 0.0}
+        session = Session(lambda _packet: None, on_notification=seen.append, clock=lambda: now["t"])
+        session.state = "ready"
+        app = "com.example.Evil"
+        session._waiting[app] = [{"uid": 1, "app": "", "title": "t"}]
+        session._current = ("app", app, now["t"] + COMMAND_TIMEOUT)
+        now["t"] += COMMAND_TIMEOUT + 1
+        self.assertTrue(session.tick())
+        self.assertEqual(session._waiting, {})
+        self.assertIsNone(session._current)
+        self.assertEqual([note["app"] for note in seen], ["Evil"])
+
+    def test_app_lookups_stop_when_the_queue_is_full(self):
+        from omaiphone.companion import MAX_QUEUED, MAX_TRACKED, Session
+        seen = []
+        session = Session(lambda _packet: None, on_notification=seen.append, clock=lambda: 0)
+        session.state = "ready"
+        session._current = ("attributes", 1, 100)
+        session._commands = [("attributes", i, b"x") for i in range(MAX_QUEUED)]
+        session._events[7] = {
+            "event": "added", "category": "other", "silent": False, "important": False,
+            "preexisting": False, "canDismiss": False,
+        }
+        session._notification_read(7, {ancs.ATTR_APP_ID: "com.example.New", ancs.ATTR_TITLE: "Hi"})
+        self.assertEqual(len(session._commands), MAX_QUEUED)
+        self.assertEqual(session._waiting, {})
+        self.assertEqual(seen[0]["app"], "New")
+
+        session._waiting["com.example.App"] = [{"uid": i} for i in range(MAX_TRACKED)]
+        session._events[8] = dict(session._events[7])
+        session._notification_read(8, {ancs.ATTR_APP_ID: "com.example.App", ancs.ATTR_TITLE: "x"})
+        self.assertEqual(len(session._waiting["com.example.App"]), MAX_TRACKED)
+        self.assertEqual(seen[-1]["uid"], 8)
+
 
 if __name__ == "__main__":
     unittest.main()
