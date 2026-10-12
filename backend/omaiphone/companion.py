@@ -17,6 +17,7 @@ BATTERY_LEVEL = "00002a19-0000-1000-8000-00805f9b34fb"
 REQUEST_TIMEOUT = 12   # seconds without an answer before the link counts as dead
 COMMAND_TIMEOUT = 6    # seconds to wait for the details of one notification
 MAX_QUEUED = 300
+MAX_TRACKED = 400      # notification uids and app names kept at once
 
 
 def fallback_app_name(app_id):
@@ -197,6 +198,9 @@ class Session:
             self._event(ancs.parse_event(value))
         elif handle == self._handles.get(ancs.DATA_SOURCE):
             self._data += value
+            if len(self._data) > ancs.MAX_ACCUMULATED:
+                # Not a text we asked for. Drop it instead of growing forever.
+                self._data = self._data[-ancs.MAX_ACCUMULATED:]
             self._data_arrived()
         elif handle == self._handles.get(ancs.ENTITY_UPDATE):
             update = ancs.parse_media_update(value)
@@ -220,7 +224,14 @@ class Session:
                 held[:] = [n for n in held if n["uid"] != uid]
             self.on_removed(uid)
             return
+        # Reinsert so an update counts as newest and eviction always moves forward.
+        self._events.pop(uid, None)
         self._events[uid] = event
+        while len(self._events) > MAX_TRACKED:
+            oldest = next(iter(self._events))
+            self._events.pop(oldest, None)
+            self._commands = [c for c in self._commands if c[:2] != ("attributes", oldest)]
+            self.on_removed(oldest)
         if ("attributes", uid) not in [c[:2] for c in self._commands] and len(self._commands) < MAX_QUEUED:
             self._commands.append(("attributes", uid, ancs.get_notification_attributes(uid)))
         self._next_command()
@@ -254,8 +265,17 @@ class Session:
             self._data = b""
             return
         kind, key, _deadline = self._current
+        try:
+            if kind == "attributes":
+                parsed = ancs.parse_notification_attributes(self._data)
+            elif kind == "app":
+                parsed = ancs.parse_app_attributes(self._data)
+            else:
+                parsed = None
+        except ancs.Rejected:
+            self._finish_command()
+            return
         if kind == "attributes":
-            parsed = ancs.parse_notification_attributes(self._data)
             if parsed is None:
                 return
             uid, attributes = parsed
@@ -265,7 +285,6 @@ class Session:
             self._finish_command()
             self._notification_read(uid, attributes)
         elif kind == "app":
-            parsed = ancs.parse_app_attributes(self._data)
             if parsed is None:
                 return
             app_id, attributes = parsed
@@ -304,7 +323,10 @@ class Session:
             self._next_command()
 
     def _app_named(self, app_id, name):
-        self._app_names[app_id] = name or fallback_app_name(app_id)
+        self._app_names.pop(app_id, None)
+        self._app_names[app_id] = (name or fallback_app_name(app_id))[:ancs.MAX_MEDIA_CHARS]
+        while len(self._app_names) > MAX_TRACKED:
+            self._app_names.pop(next(iter(self._app_names)), None)
         for notification in self._waiting.pop(app_id, []):
             notification["app"] = self._app_names[app_id]
             self.on_notification(notification)
