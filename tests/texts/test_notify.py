@@ -20,7 +20,7 @@ class NotifyArgTests(unittest.TestCase):
         args = messagesd.notification_argv("Sam <3>", '<img src="http://evil/x">')
         title = args[args.index("--") + 1]
         body = args[-1]
-        self.assertNotIn("<", title)
+        self.assertEqual(title, "Sam <3>")  # titles are plain text in Omarchy
         self.assertNotIn("<", body)
         self.assertIn("&lt;img", body)
         self.assertNotIn("http://evil", body.split("&")[0])

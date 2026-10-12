@@ -113,11 +113,12 @@ def toast_text(notification):
 
 
 def toast_payload(notification):
-    """The same three strings, escaped and capped for the notification daemon."""
+    """The same three strings, capped; the body is escaped. Omarchy shows the app
+    name and title as plain text (tested), so escaping those would show "&amp;"."""
     app, title, body = toast_text(notification)
     return (
-        plain_markup(app, 80) or "iPhone",
-        plain_markup(title, 120) or "iPhone",
+        " ".join(str(app or "").replace("\x00", "").split())[:80] or "iPhone",
+        " ".join(str(title or "").replace("\x00", "").split())[:120] or "iPhone",
         plain_markup(body, 400, keep_newlines=True),
     )
 

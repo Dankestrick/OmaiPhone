@@ -88,8 +88,9 @@ class ToastRuleTests(unittest.TestCase):
     def test_toast_payload_is_plain_text(self):
         app, summary, body = notifications.toast_payload(
             notification(1, app='<img src="http://evil/a">', title="--help", message='<a href="http://evil">x</a>'))
-        self.assertNotIn("<", app + summary + body)
+        self.assertNotIn("<", body)
         self.assertIn("&lt;", body)
+        self.assertEqual(summary, "--help")  # shown as plain text, never an option (D-Bus call)
         self.assertLessEqual(len(summary), 120)
         self.assertLessEqual(len(body), 400)
 
