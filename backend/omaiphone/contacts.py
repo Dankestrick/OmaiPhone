@@ -7,6 +7,8 @@ contains name + numbers, readable only by the user. Nothing leaves the PC.
 import json
 import os
 import re
+import stat
+import tempfile
 
 from gi.repository import Gio, GLib
 
@@ -23,6 +25,16 @@ CACHE_FILE = os.path.join(DATA_DIR, "contacts.json")
 CALLLOG_FILE = os.path.join(DATA_DIR, "calllog.json")
 MATCH_DIGITS = 9  # compare the last 9 digits: +43 660 1234567 == 0660 1234567
 
+# A phone book or call log is phone input. These caps are far above a real
+# iPhone and stop a hostile device from filling memory or the disk.
+MAX_DOWNLOAD_BYTES = 2 * 1024 * 1024
+MAX_CONTACTS = 5000
+MAX_NAME = 200
+MAX_NUMBER = 64
+MAX_EMAIL = 254
+MAX_PER_CARD = 20
+MAX_HISTORY = 500
+
 
 class ContactsError(RuntimeError):
     pass
@@ -36,11 +48,17 @@ def _unfold(text):
 
 
 def _decode(value):
-    return value.replace("\\,", ",").replace("\\;", ";").replace("\\n", " ").strip()
+    return value.replace("\\,", ",").replace("\\;", ";").replace("\\n", " ").replace("\x00", "").strip()
+
+
+def _clip(value, limit):
+    return _decode(str(value or ""))[:limit]
 
 
 def parse_vcards(text):
     """Return [{"name": str, "numbers": [str], "emails": [str]}] from vCard 2.1/3.0 text."""
+    if len(text) > MAX_DOWNLOAD_BYTES:
+        text = text[:MAX_DOWNLOAD_BYTES]
     contacts = []
     current = None
     for line in _unfold(text).splitlines():
@@ -49,23 +67,25 @@ def parse_vcards(text):
         if field == "BEGIN":
             current = {"fn": "", "n": "", "numbers": [], "emails": []}
         elif field == "END" and current is not None:
-            name = current["fn"] or current["n"]
+            name = _clip(current["fn"] or current["n"], MAX_NAME)
             if name and (current["numbers"] or current["emails"]):
                 contacts.append({"name": name, "numbers": current["numbers"], "emails": current["emails"]})
             current = None
+            if len(contacts) >= MAX_CONTACTS:
+                break
         elif current is None:
             continue
         elif field == "FN":
-            current["fn"] = _decode(value)
+            current["fn"] = _clip(value, MAX_NAME)
         elif field == "N":
-            parts = [_decode(p) for p in value.split(";")]
+            parts = [_clip(p, MAX_NAME) for p in value.split(";")]
             # N:Last;First;Middle;Prefix;Suffix -> "First Last"
-            current["n"] = " ".join(p for p in (parts[1] if len(parts) > 1 else "", parts[0]) if p)
-        elif field == "TEL" and value.strip():
-            current["numbers"].append(value.strip())
-        elif field == "EMAIL" and "@" in value:
+            current["n"] = " ".join(p for p in (parts[1] if len(parts) > 1 else "", parts[0]) if p)[:MAX_NAME]
+        elif field == "TEL" and value.strip() and len(current["numbers"]) < MAX_PER_CARD:
+            current["numbers"].append(_clip(value, MAX_NUMBER))
+        elif field == "EMAIL" and "@" in value and len(current["emails"]) < MAX_PER_CARD:
             # iMessage also reaches people by email; the Messages part uses these.
-            current["emails"].append(value.strip())
+            current["emails"].append(_clip(value, MAX_EMAIL))
     return contacts
 
 
@@ -77,6 +97,8 @@ def parse_history(text):
 
     "time" is ISO 8601 local time as sent by the phone (X-IRMC-CALL-DATETIME).
     """
+    if len(text) > MAX_DOWNLOAD_BYTES:
+        text = text[:MAX_DOWNLOAD_BYTES]
     entries = []
     current = None
     for line in _unfold(text).splitlines():
@@ -87,6 +109,9 @@ def parse_history(text):
             current = {"type": "", "time": "", "number": "", "name": ""}
         elif field == "END" and current is not None:
             if current["type"]:
+                current["number"] = _clip(current["number"], MAX_NUMBER)
+                current["name"] = _clip(current["name"], MAX_NAME)
+                current["time"] = _clip(current["time"], 40)
                 entries.append(current)
             current = None
         elif current is None:
@@ -98,14 +123,14 @@ def parse_history(text):
             if m:
                 current["time"] = "{}-{}-{}T{}:{}:{}".format(*m.groups())
         elif field == "TEL" and not current["number"]:
-            current["number"] = value.strip()
+            current["number"] = _clip(value, MAX_NUMBER)
         elif field == "FN" and value.strip():
-            current["name"] = _decode(value)
+            current["name"] = _clip(value, MAX_NAME)
         elif field == "N" and not current["name"]:
-            n = [_decode(p) for p in value.split(";")]
-            current["name"] = " ".join(p for p in (n[1] if len(n) > 1 else "", n[0]) if p)
+            n = [_clip(p, MAX_NAME) for p in value.split(";")]
+            current["name"] = " ".join(p for p in (n[1] if len(n) > 1 else "", n[0]) if p)[:MAX_NAME]
     entries.sort(key=lambda e: e["time"], reverse=True)
-    return entries
+    return entries[:MAX_HISTORY]
 
 
 def match_key(number):
@@ -190,6 +215,51 @@ def _call(bus, path, iface, method, args=None, reply=None, timeout=60000):
         raise ContactsError(text.split(":", 2)[-1].strip() or text)
 
 
+def obex_download_ok(filename):
+    """True when `filename` is an absolute path inside the temp directory.
+
+    obexd creates the phone book with g_file_open_tmp. A name outside that
+    directory is not a download this process asked for, and must not be read
+    or deleted.
+    """
+    if not isinstance(filename, str) or not os.path.isabs(filename):
+        return False
+    root = os.path.realpath(tempfile.gettempdir())
+    parent = os.path.realpath(os.path.dirname(filename))
+    return parent == root or parent.startswith(root + os.sep)
+
+
+def read_obex_download(filename, limit=MAX_DOWNLOAD_BYTES):
+    """Read one obexd download, refusing symlinks and anything past `limit` bytes."""
+    if not obex_download_ok(filename):
+        raise ContactsError("the download was not in the temporary directory")
+    try:
+        fd = os.open(filename, os.O_RDONLY | os.O_NOFOLLOW)
+    except OSError as error:
+        raise ContactsError("the download could not be read") from error
+    try:
+        if not stat.S_ISREG(os.fstat(fd).st_mode):
+            raise ContactsError("the download could not be read")
+        blob = os.read(fd, limit + 1)
+    finally:
+        os.close(fd)
+    if len(blob) > limit:
+        blob = blob[:limit]
+    return blob.decode("utf-8", errors="replace")
+
+
+def take_obex_download(filename, limit=MAX_DOWNLOAD_BYTES):
+    """Read a download and delete it. A path outside the temp dir is left alone."""
+    try:
+        return read_obex_download(filename, limit)
+    finally:
+        if obex_download_ok(filename):
+            try:
+                os.remove(filename)
+            except OSError:
+                pass
+
+
 def _pull(address, folder, fields=None, timeout=120, empty_message=None):
     """PullAll of one PBAP folder (pb, cch, ich, och, mch); returns vCard text."""
     bus = _bus()
@@ -235,14 +305,7 @@ def _pull(address, folder, fields=None, timeout=120, empty_message=None):
         bus.signal_unsubscribe(sub)
         if result["status"] != "complete":
             raise ContactsError(f"download of '{folder}' did not finish")
-        try:
-            with open(filename, encoding="utf-8", errors="replace") as handle:
-                return handle.read()
-        finally:
-            try:
-                os.remove(filename)
-            except OSError:
-                pass
+        return take_obex_download(filename)
     finally:
         try:
             _call(bus, OBEX_PATH, CLIENT_IFACE, "RemoveSession", GLib.Variant("(o)", (session,)))
@@ -308,8 +371,15 @@ def load_calllog(path=CALLLOG_FILE):
 
 def record_call(kind, number, name, when, path=CALLLOG_FILE):
     """Append a call seen live over HFP (the phone's PBAP log can lag behind)."""
+    if kind not in ("missed", "received", "dialed"):
+        return
     log = load_calllog(path)
-    log.insert(0, {"type": kind, "time": when, "number": number or "", "name": name or ""})
+    log.insert(0, {
+        "type": kind,
+        "time": _clip(when, 40),
+        "number": _clip(number, MAX_NUMBER),
+        "name": _clip(name, MAX_NAME),
+    })
     _write_private(path, log[:CALLLOG_MAX])
 
 

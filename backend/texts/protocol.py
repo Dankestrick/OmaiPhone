@@ -289,12 +289,20 @@ def present_message(body: str, has_attachment: bool) -> str:
     return text
 
 
+# A bMessage carries two cards. More than this, or a huge field, is hostile.
+_MAX_CARDS = 8
+_MAX_VALUES = 8
+_MAX_FIELD = 200
+
+
 def parse_vcards(raw: str) -> list[dict]:
     """Read names, phones, and emails out of a PBAP vCard file.
 
     PBAP is the Bluetooth phone book. Each card can carry several numbers.
     Callers still run those numbers through the E.164 helpers before sending.
     """
+    if len(raw) > _PRESENT_SCAN * 4:
+        raw = raw[:_PRESENT_SCAN * 4]
     people = []
     current = None
     for raw_line in raw.splitlines():
@@ -311,6 +319,8 @@ def parse_vcards(raw: str) -> list[dict]:
             if current and (current["name"] or current["phones"] or current["emails"]):
                 people.append(current)
             current = None
+            if len(people) >= _MAX_CARDS:
+                break
             continue
         if current is None or ":" not in line:
             continue
@@ -320,12 +330,12 @@ def parse_vcards(raw: str) -> list[dict]:
         field = key.split(";")[0].upper()
         if "." in field:
             field = field.rsplit(".", 1)[-1]
-        value = value.strip()
+        value = value.replace("\x00", "").strip()[:_MAX_FIELD]
         if field == "FN" and value:
             current["name"] = value
-        elif field == "TEL" and value:
+        elif field == "TEL" and value and len(current["phones"]) < _MAX_VALUES:
             current["phones"].append(value)
-        elif field == "EMAIL" and value:
+        elif field == "EMAIL" and value and len(current["emails"]) < _MAX_VALUES:
             current["emails"].append(value)
     return people
 

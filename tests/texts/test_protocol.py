@@ -132,6 +132,14 @@ class VCardTests(unittest.TestCase):
         self.assertEqual(people[0]["phones"], ["+15551234567"])
         self.assertEqual(people[0]["emails"], ["ada@example.com"])
 
+    def test_cards_and_fields_are_capped(self):
+        card = "BEGIN:VCARD\nFN:" + ("N" * 500) + "\n" + "".join(f"TEL:{i}\n" for i in range(20)) + "END:VCARD\n"
+        raw = card * (protocol._MAX_CARDS + 4)
+        people = protocol.parse_vcards(raw)
+        self.assertEqual(len(people), protocol._MAX_CARDS)
+        self.assertEqual(len(people[0]["name"]), protocol._MAX_FIELD)
+        self.assertEqual(len(people[0]["phones"]), protocol._MAX_VALUES)
+
 
 class NotificationTests(unittest.TestCase):
     def test_number_is_not_used_as_a_title(self):

@@ -51,6 +51,9 @@ _MAX_TRACKED_HANDLES = 500
 _MAX_BMESSAGE_BYTES = 128 * 1024
 # MAP handles are hex, at most 16 digits. Anything else must not become a path.
 _HANDLE_TOKEN = re.compile(r"^[0-9A-Fa-f]{1,16}$")
+# The shared phone book is written by us, but only after a download. Refuse
+# to parse a file that has grown past the download cap.
+_MAX_CONTACTS_FILE = 2 * 1024 * 1024
 _OBEX_CANDIDATES = (
     "/usr/lib/bluetooth/obexd",
     "/usr/libexec/bluetooth/obexd",
@@ -885,7 +888,14 @@ class BluetoothSession:
         if mtime == self._contacts_mtime:
             return self.store.contact_count() > 0
         try:
-            entries = json.loads(path.read_text(encoding="utf-8")).get("contacts", [])
+            with path.open("rb") as handle:
+                raw = handle.read(_MAX_CONTACTS_FILE + 1)
+            if len(raw) > _MAX_CONTACTS_FILE:
+                return self.store.contact_count() > 0
+            payload = json.loads(raw.decode("utf-8"))
+            entries = payload.get("contacts", []) if isinstance(payload, dict) else []
+            if not isinstance(entries, list):
+                entries = []
         except (OSError, ValueError):
             return self.store.contact_count() > 0
         self._contacts_mtime = mtime
