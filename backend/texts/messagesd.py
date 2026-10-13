@@ -418,11 +418,24 @@ def _clear_phone_alerts(store, thread: str, address: str = "") -> None:
     the Messages card does not show an error for it.
     """
     try:
-        from seen import clear_conversation
+        from seen import _dismiss_on_phone, clear_conversation
 
-        clear_conversation(store, thread, address)
+        # Dismiss is a blocking D-Bus call (8 s timeout); keep it off the event loop.
+        loop = asyncio.get_running_loop()
+
+        def dismiss(uid):
+            loop.run_in_executor(None, _quiet_dismiss, _dismiss_on_phone, uid)
+
+        clear_conversation(store, thread, address, dismiss=dismiss)
     except Exception:
         return
+
+
+def _quiet_dismiss(dismiss, uid) -> None:
+    try:
+        dismiss(uid)
+    except Exception:
+        pass
 
 
 async def handle(raw: str, store: Store, session) -> None:
