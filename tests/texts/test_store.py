@@ -104,6 +104,20 @@ class StoreTests(unittest.TestCase):
         mode = os.stat(self.db.path).st_mode & 0o777
         self.assertEqual(mode, 0o600)
 
+    def test_a_new_database_file_starts_private(self):
+        # Without the later chmod, the file sqlite opens must already be 0600.
+        path = Path(self._tmp.name) / "fresh.db"
+        old_umask = os.umask(0o022)
+        old_ensure = store._ensure_mode
+        store._ensure_mode = lambda path, mode: None
+        try:
+            fresh = store.Store(path)
+            fresh.close()
+        finally:
+            store._ensure_mode = old_ensure
+            os.umask(old_umask)
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o600)
+
     def test_threads_group_and_present_attachments(self):
         self.db.set_own_number("+15550001111")
         created, is_new = self.db.upsert_message(

@@ -30,11 +30,9 @@ The mirror `Toaster` in `mirror.py` and the `notify-send` call in `backend/texts
 
 | Location | Severity | What a malicious phone could do | Why it is still open |
 | --- | --- | --- | --- |
-| `backend/omaiphone/daemon.py:339` | med | The incoming-call notification body is the caller name and number, unescaped. Freedesktop notification bodies are markup, so a name of `<img src="...">` or `<a href="...">` is rendered by the notification daemon. `be49002` limits each field to 80 characters on the way into the daemon, which bounds the payload and does not escape it. | `daemon.py` is the other checkout's file. Escaping belongs at this Notify call. |
 | `backend/omaiphone/daemon.py:100` | low | At startup the Bluetooth address is copied off the gateway properties without the clip in `events.clip_text`. A live connect event is clipped. An enormous address string would be stored and later written into the audio state file. PipeWire normally puts a BD_ADDR here; this is only a problem if that property is not a short address. | The read is in `daemon.py`. |
 | `backend/omaiphone/daemon.py:230` | low | An unknown call state is logged with `value`. After `be49002` that value is already one 32-character line, so the log cannot grow with the phone's string. The line can still contain those 32 characters. | Logging is in `daemon.py`. The exception from `from_pipewire` no longer includes the raw text. |
 | `backend/omaiphone/state.py:76` | low | `CallStateMachine.history` grows by one entry every time the phone moves the call, including active/held forever. | `daemon.py` `_record` decides missed, received, or dialed by whether `INCOMING`, `ACTIVE`, `DIALING`, or `ALERTING` appear in that list. Dropping early entries would record the call as the wrong kind. One call's list of short enum values is a small leak, not a parser bug. |
-| `backend/texts/store.py:85` | low | `sqlite3.connect` creates `messages.db` with the process umask (often 0644) and `_ensure_mode` chmods it to 0600 just after. The parent directory is 0700, so other users cannot walk in during that window. | The window is inside a private directory. Chmod-on-every-write was avoided on purpose: a chmod under `~/.local/share` makes the shell rescan plugins. |
 
 ## Suspected, not confirmed
 

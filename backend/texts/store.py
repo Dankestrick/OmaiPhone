@@ -100,6 +100,9 @@ class Store:
         self.path = path or (data_dir() / "messages.db")
         self.path.parent.mkdir(parents=True, exist_ok=True)
         _ensure_mode(self.path.parent, 0o700)
+        # Create the file 0600 first, so it is never readable by others, not
+        # even for the moment between sqlite creating it and the chmod below.
+        os.close(os.open(self.path, os.O_RDWR | os.O_CREAT | os.O_NOFOLLOW | os.O_CLOEXEC, 0o600))
         self._db = sqlite3.connect(self.path)
         self._db.row_factory = sqlite3.Row
         # DELETE mode keeps the texts in one file. WAL would create extra
