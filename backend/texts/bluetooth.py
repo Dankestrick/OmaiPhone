@@ -61,6 +61,9 @@ _MAX_OBJECT_PATH = 240
 # The shared phone book is written by us, but only after a download. Refuse
 # to parse a file that has grown past the download cap.
 _MAX_CONTACTS_FILE = 2 * 1024 * 1024
+# Seconds between tries to get a dropped message link back. The last one
+# repeats until the phone is back in range.
+_RELINK_DELAYS = (3, 5, 10, 20, 30, 60)
 _OBEX_CANDIDATES = (
     "/usr/lib/bluetooth/obexd",
     "/usr/libexec/bluetooth/obexd",
@@ -368,6 +371,7 @@ class BluetoothSession:
         self._announce_live = False
         self._listening = False
         self._contacts_watching = False
+        self._relinking = False
         # These must stay referenced. If Python collects them, new-text
         # alerts from the phone are silently dropped.
         self._obex_root = None
@@ -569,7 +573,60 @@ class BluetoothSession:
 
         self._track(_restore())
 
+    def _on_link_lost(self) -> None:
+        """Forget a message session obexd has closed and start getting it back."""
+        if not self._map_path:
+            return
+        self._map_path = ""
+        # Message objects lived under the old session and are gone with it.
+        self._message_paths.clear()
+        self.state = "phone_nearby"
+        self.detail = "The message link dropped. Reconnecting."
+        self.push_status()
+        if not self._relinking:
+            self._relinking = True
+            self._track(self._relink())
+
+    async def _relink(self) -> None:
+        """Retry the message link until it is back, slowing down over time."""
+        try:
+            attempt = 0
+            while self._session_bus and not self._map_path:
+                await asyncio.sleep(_RELINK_DELAYS[min(attempt, len(_RELINK_DELAYS) - 1)])
+                attempt += 1
+                settings = self.store.settings()
+                if self._map_path or not settings["phoneAddress"] or self.state in ("pairing", "scanning"):
+                    return
+                await self._safe_reconnect()
+        finally:
+            self._relinking = False
+
+    async def _map_alive(self) -> bool:
+        if not self._session_bus or not self._map_path:
+            return False
+        try:
+            objects = await self._managed("org.bluez.obex", "/", self._session_bus)
+        except Exception:
+            return False
+        return self._map_path in objects
+
     async def send(self, address: str, body: str) -> None:
+        if not self._map_path:
+            await self._safe_reconnect()
+        try:
+            await self._push_text(address, body)
+        except Exception:
+            # Only retry when the session itself is gone. If it is still up,
+            # the phone refused the text and a resend could deliver it twice.
+            if not self._map_path or await self._map_alive():
+                raise
+            self._on_link_lost()
+            await self._safe_reconnect()
+            if not self._map_path:
+                raise RuntimeError("The message link to the iPhone dropped. Try again in a moment.")
+            await self._push_text(address, body)
+
+    async def _push_text(self, address: str, body: str) -> None:
         async with self.lock:
             if not self._map_path:
                 raise RuntimeError("The phone is not connected for messages yet.")
@@ -763,6 +820,11 @@ class BluetoothSession:
         saved = 0
         seen = 0
         objects = await self._managed("org.bluez.obex", "/", self._session_bus)
+        if self._map_path not in objects:
+            # obexd closed the session (phone walked off, Bluetooth hiccup).
+            # The old path is dead; sends and alerts would fail silently.
+            self._on_link_lost()
+            return 0
         prefix = self._map_path + "/message"
         for path, interfaces in objects.items():
             if seen >= _MAX_LISTING:
