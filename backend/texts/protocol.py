@@ -100,6 +100,31 @@ def coerce_phone(value: str, own_number: str) -> str:
     return ""
 
 
+def home_hint(numbers) -> str:
+    """Stand in for your own number when it is not known.
+
+    The phone book often saves local numbers without a country code. Texts
+    from the iPhone always carry one. When most full international numbers
+    share a calling code, one of them is returned so coerce_phone can use
+    that code. No clear majority means no guess.
+    """
+    counts: dict[str, int] = {}
+    sample: dict[str, str] = {}
+    total = 0
+    for value in numbers:
+        phone = normalize_phone(str(value or ""))
+        code = calling_code(phone)
+        if not code:
+            continue
+        total += 1
+        counts[code] = counts.get(code, 0) + 1
+        sample.setdefault(code, phone)
+    if not total:
+        return ""
+    code = max(counts, key=lambda key: counts[key])
+    return sample[code] if counts[code] * 2 > total else ""
+
+
 def thread_key(address: str, own_number: str = "") -> str:
     """Group texts from the same person under one stable key.
 

@@ -32,6 +32,7 @@ from protocol import (
     coerce_phone,
     extract_bmessage_peer,
     extract_bmessage_text,
+    home_hint,
     normalize_email,
     present_message,
     public_error,
@@ -1031,6 +1032,12 @@ class BluetoothSession:
             return self.store.contact_count() > 0
         self._contacts_mtime = mtime
         own = self.store.settings()["ownNumber"]
+        if not own:
+            # Without your number, "(352) 555-0100" has no country and would
+            # be skipped. Borrow the code your other contacts and texts use.
+            known = [phone for card in entries if isinstance(card, dict) for phone in card.get("numbers") or []]
+            known += [address_from_thread(thread["key"]) for thread in self.store.threads()]
+            own = home_hint(known)
         rows = []
         for card in entries:
             name = str(card.get("name") or "Unknown")

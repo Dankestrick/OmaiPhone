@@ -28,6 +28,15 @@ class NormalizeTests(unittest.TestCase):
         self.assertEqual(protocol.coerce_phone("07123456789", "+447700900123"), "+447123456789")
         self.assertEqual(protocol.coerce_phone("447123456789", "+447700900123"), "+447123456789")
 
+    def test_home_hint_borrows_the_common_code(self):
+        hint = protocol.home_hint(["(555) 123-4567", "+15550001111", "+1 555 000 2222", "+447700900123"])
+        self.assertTrue(hint.startswith("+1"))
+        self.assertEqual(protocol.coerce_phone("(555) 123-4567", hint), "+15551234567")
+
+    def test_home_hint_needs_a_clear_majority(self):
+        self.assertEqual(protocol.home_hint(["+15550001111", "+447700900123"]), "")
+        self.assertEqual(protocol.home_hint(["(555) 123-4567", ""]), "")
+
 
 class ThreadTests(unittest.TestCase):
     def test_same_person_shares_a_key(self):
@@ -40,7 +49,7 @@ class ThreadTests(unittest.TestCase):
         self.assertEqual(protocol.thread_key("Ada@Example.com"), "email:ada@example.com")
 
 
-class VCardTests(unittest.TestCase):
+class VCardItemTests(unittest.TestCase):
     def test_iphone_item_fields_are_read(self):
         raw = "BEGIN:VCARD\r\nFN:Sam\r\nitem1.TEL;TYPE=CELL:+15557654321\r\n PHOTO;ENCODING=b:aaaa\r\nEND:VCARD\r\n"
         people = protocol.parse_vcards(raw)
