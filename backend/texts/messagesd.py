@@ -6,8 +6,8 @@ stdin. Events go out as JSON lines on stdout. Stderr is only for
 connection state. Message text, contact names, pairing codes, and your
 phone number are never written there.
 
-This process runs as your user. It does not use sudo, and it does
-not start a shell to run commands.
+This process runs as your user. It does not use sudo.
+It does not start a shell to run commands.
 """
 
 from __future__ import annotations
@@ -49,9 +49,8 @@ def _plain_title(value: str, limit: int) -> str:
 def notification_text(value: str, limit: int, keep_newlines: bool = False) -> str:
     """Plain text for a desktop notification.
 
-    notify-send and the notification daemon treat the body as markup.
-    A name or a text from the phone must not become an option (`--urgency`)
-    or a tag (`<img>`, `<a href>`).
+    The notification daemon treats the body as markup.
+    A name or a text from the phone must not become a tag (`<img>`, `<a href>`).
     """
     text = str(value or "").replace("\x00", "")
     if keep_newlines:

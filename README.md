@@ -41,7 +41,7 @@ driven by the keyboard.
 - PipeWire with WirePlumber (Omarchy's default). Calls use PipeWire's
   hands-free telephony service.
 - These packages, all in Arch's `extra` repo:
-  `python-gobject python-dbus-next bluez-obex pipewire-audio libpulse libnotify`
+  `python-gobject python-dbus-next bluez-obex pipewire-audio libpulse`
 
 ```sh
 omarchy pkg add python-gobject python-dbus-next bluez-obex
@@ -96,6 +96,32 @@ The phone book downloads once and both parts read it. Texts already pop up
 with the sender's name, so the Messages app's own notifications don't pop up a
 second time.
 
+## Permissions and safety
+
+OmaiPhone runs as your user. At runtime, OmaiPhone does not use sudo or pkexec.
+
+The shell starts `omaiphone-ctl daemon` and `backend/texts/messagesd.py`.
+`setpriv` only makes those two exit with the shell. If obexd is not already
+running, the texts program starts it. A call rings with `pw-play`. During a
+call, `pactl` loads its own echo-cancel module and unloads that module when
+the call ends. It also mutes the call microphone, and puts the default speaker
+and microphone back if they changed. Pairing runs `btmgmt class` so the iPhone
+offers its switches, and puts the previous class back after pairing.
+`omaiphone-ctl diagnostics` uses `systemctl is-active` only to read whether
+Bluetooth, PipeWire, and WirePlumber are up. It does not start or stop them.
+The same command also runs read-only checks with `bluetoothctl`, `busctl`, and
+`pactl`.
+
+It talks to BlueZ, obexd, and PipeWire's telephony service over D-Bus. Call,
+text, and mirror pop-ups go to the notification daemon over D-Bus too. It
+makes no network request and talks to no cloud.
+
+The files it writes are listed under Your data. Each file is mode 0600 and
+each folder is mode 0700.
+
+The phone is untrusted input. Downloads and fields are size-capped, and text
+from the phone is escaped before it is shown.
+
 ## Your data
 
 Everything stays on this PC and is readable only by you:
@@ -106,6 +132,7 @@ Everything stays on this PC and is readable only by you:
 | Contacts, recent calls | `~/.local/share/omaiphone/` |
 | Settings | `~/.config/omaiphone/config.json` |
 | The iPhone's current notifications | `$XDG_RUNTIME_DIR/omaiphone/` (memory, gone at logout) |
+| Speaker and microphone from before a call, and the last number dialed | `~/.local/state/omaiphone/` |
 
 Notification and message texts are never written to logs.
 
@@ -116,7 +143,7 @@ omarchy plugin remove io.github.dankestrick.omaiphone
 rm -rf ~/.local/share/omaiphone ~/.local/state/omaiphone ~/.config/omaiphone
 ```
 
-The second line deletes your saved texts, contacts and settings.
+The second line deletes your saved texts, contacts, settings, and that call-audio folder.
 
 ## Tests
 

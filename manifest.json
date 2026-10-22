@@ -38,11 +38,6 @@
       "why": "Finds and mutes the call's audio streams"
     },
     {
-      "name": "notify-send",
-      "package": "libnotify",
-      "why": "Pop-ups for new texts"
-    },
-    {
       "name": "setpriv",
       "package": "util-linux",
       "why": "Ends the background programs together with the shell"
