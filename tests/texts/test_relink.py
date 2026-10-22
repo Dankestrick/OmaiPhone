@@ -112,6 +112,69 @@ class RelinkTests(unittest.TestCase):
         asyncio.run(self.session.send("+15551234567", "hi"))
         self.assertEqual(sent, [NEW_SESSION])
 
+    def test_lost_session_is_removed_so_the_phone_frees_it(self):
+        removed = []
+
+        async def remove(path):
+            removed.append(path)
+
+        self.session._remove_session = remove
+        self._drop()
+        delays = bluetooth._RELINK_DELAYS
+        bluetooth._RELINK_DELAYS = (0,)
+        try:
+            async def run():
+                await self.session._collect_live_messages(False)
+                await asyncio.gather(*self.session._tasks)
+
+            asyncio.run(run())
+        finally:
+            bluetooth._RELINK_DELAYS = delays
+        self.assertEqual(removed, [SESSION])
+
+    def test_relink_waits_out_a_scan_instead_of_giving_up(self):
+        self._drop()
+        delays = bluetooth._RELINK_DELAYS
+        bluetooth._RELINK_DELAYS = (0,)
+        try:
+            async def run():
+                await self.session._collect_live_messages(False)
+                self.session.state = "scanning"
+                await asyncio.sleep(0.01)
+                self.assertEqual(self.reconnects, 0)
+                self.session.state = "not_paired"
+                await asyncio.gather(*self.session._tasks)
+
+            asyncio.run(run())
+        finally:
+            bluetooth._RELINK_DELAYS = delays
+        self.assertEqual(self.reconnects, 1)
+        self.assertEqual(self.session._map_path, NEW_SESSION)
+
+
+class BoundedBusTests(unittest.TestCase):
+    def test_a_call_with_no_reply_gives_up(self):
+        class Msg:
+            member = "ListMessages"
+
+        async def never(self, msg):
+            await asyncio.Event().wait()
+
+        original = bluetooth.MessageBus.call
+        timeout = bluetooth._DBUS_TIMEOUT
+        bluetooth.MessageBus.call = never
+        bluetooth._DBUS_TIMEOUT = 0.01
+        try:
+            bus = bluetooth._BoundedBus.__new__(bluetooth._BoundedBus)
+            with self.assertRaisesRegex(RuntimeError, "did not answer in time"):
+                asyncio.run(bus.call(Msg()))
+        finally:
+            bluetooth.MessageBus.call = original
+            bluetooth._DBUS_TIMEOUT = timeout
+
+    def test_pairing_waits_longer_than_the_phone_prompt(self):
+        self.assertGreater(bluetooth._DBUS_SLOW_TIMEOUTS["Pair"], 90)
+
 
 if __name__ == "__main__":
     unittest.main()

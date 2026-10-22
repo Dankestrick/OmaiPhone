@@ -65,6 +65,11 @@ _MAX_CONTACTS_FILE = 2 * 1024 * 1024
 # Seconds between tries to get a dropped message link back. The last one
 # repeats until the phone is back in range.
 _RELINK_DELAYS = (3, 5, 10, 20, 30, 60)
+# dbus-next waits for a reply forever. A stuck obexd or BlueZ must not hold
+# self.lock, so every call gives up after these many seconds. Pairing waits
+# for a tap on the iPhone (the agent allows 90), so it gets longer.
+_DBUS_TIMEOUT = 30
+_DBUS_SLOW_TIMEOUTS = {"Pair": 120, "Connect": 60, "CreateSession": 60}
 _OBEX_CANDIDATES = (
     "/usr/lib/bluetooth/obexd",
     "/usr/libexec/bluetooth/obexd",
@@ -191,6 +196,17 @@ def _map_time(value: str) -> str:
     return f"{digits[0:4]}-{digits[4:6]}-{digits[6:8]}T{digits[8:10]}:{digits[10:12]}:{digits[12:14]}"
 
 
+class _BoundedBus(MessageBus):
+    """A MessageBus whose method calls give up instead of waiting forever."""
+
+    async def call(self, msg):
+        seconds = _DBUS_SLOW_TIMEOUTS.get(msg.member or "", _DBUS_TIMEOUT)
+        try:
+            return await asyncio.wait_for(super().call(msg), timeout=seconds)
+        except asyncio.TimeoutError:
+            raise RuntimeError("Bluetooth did not answer in time. Try again in a moment.") from None
+
+
 def _read_adapter_class() -> tuple[int, int] | None:
     """Current major/minor device class, so pairing can put the old one back."""
     try:
@@ -213,7 +229,10 @@ def _read_adapter_class() -> tuple[int, int] | None:
 
 
 def _set_adapter_class(major: int, minor: int) -> bool:
-    """Ask BlueZ to present this computer as a given device class. No sudo."""
+    """Ask BlueZ to present this computer as a given device class.
+
+    btmgmt runs as your user here. Root is not required.
+    """
     try:
         result = subprocess.run(
             ["btmgmt", "--timeout", "3", "class", str(major), str(minor)],
@@ -388,8 +407,8 @@ class BluetoothSession:
         return task
 
     async def start(self) -> None:
-        self._system = await MessageBus(bus_type=BusType.SYSTEM).connect()
-        self._session_bus = await MessageBus(bus_type=BusType.SESSION).connect()
+        self._system = await _BoundedBus(bus_type=BusType.SYSTEM).connect()
+        self._session_bus = await _BoundedBus(bus_type=BusType.SESSION).connect()
         self._agent = PairAgent(self._show_code)
         self._system.export("/io/github/dankestrick/omaiphone/texts/Agent", self._agent)
         self._system.export("/io/github/dankestrick/omaiphone/texts/Advert", SolicitationAdvert())
@@ -578,9 +597,13 @@ class BluetoothSession:
         """Forget a message session obexd has closed and start getting it back."""
         if not self._map_path:
             return
+        old_path = self._map_path
         self._map_path = ""
         # Message objects lived under the old session and are gone with it.
         self._message_paths.clear()
+        # Usually obexd already closed it. If it did not, an open session
+        # would block the new one (the iPhone allows only one).
+        self._track(self._remove_session(old_path))
         self.state = "phone_nearby"
         self.detail = "The message link dropped. Reconnecting."
         self.push_status()
@@ -596,11 +619,21 @@ class BluetoothSession:
                 await asyncio.sleep(_RELINK_DELAYS[min(attempt, len(_RELINK_DELAYS) - 1)])
                 attempt += 1
                 settings = self.store.settings()
-                if self._map_path or not settings["phoneAddress"] or self.state in ("pairing", "scanning"):
+                if self._map_path or not settings["phoneAddress"]:
                     return
+                if self.state in ("pairing", "scanning"):
+                    # Wait for pairing or the scan to finish, then try again.
+                    continue
                 await self._safe_reconnect()
         finally:
             self._relinking = False
+
+    async def _remove_session(self, path: str) -> None:
+        try:
+            client = await self._iface("org.bluez.obex", "/org/bluez/obex", "org.bluez.obex.Client1", self._session_bus)
+            await client.call_remove_session(path)
+        except Exception:
+            pass
 
     async def _map_alive(self) -> bool:
         if not self._session_bus or not self._map_path:
@@ -768,6 +801,10 @@ class BluetoothSession:
             return
         self._listen_for_messages()
         await self._sync_inbox(announce)
+        if not self._map_path:
+            # The session dropped during the first sync. _on_link_lost has
+            # already shown that and started getting it back.
+            return
         # The calls part of OmaiPhone downloads the phone book (PBAP) once for both.
         if not self._load_shared_contacts():
             # Contacts are optional. Texts still work when Sync Contacts is off.
