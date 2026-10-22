@@ -42,9 +42,14 @@ Item {
     // is waiting for what you want to send.
     interval: 500
     repeat: true
-    running: root.opened && root.composeFocus
+    running: root.opened && (root.composeFocus || root.searchShown)
     onTriggered: root.caretOn = !root.caretOn
   }
+
+  // Contacts are picked by typing, so that screen always shows what you typed.
+  // Other lists show it once you start a filter.
+  readonly property bool searchShown: !root.composeFocus
+    && (root.screen === "contacts" || ((root.screen === "inbox" || root.screen === "setup") && root.filterText.length > 0))
 
   readonly property var svc: (shell && shell.serviceFor)
     ? shell.serviceFor((manifest && manifest.id) || "io.github.dankestrick.omaiphone") : null
@@ -811,6 +816,19 @@ Item {
                 return root.svc && root.svc.textState === "scanning" ? "Looking for your iPhone" : "Select your iPhone"
               return root.stateLabel() + (root.svc && root.svc.phoneName ? "  " + root.svc.phoneName : "")
             }
+          }
+
+          Text {
+            // What you typed to find someone, with the same blinking mark as a message.
+            Layout.fillWidth: true
+            visible: root.searchShown
+            textFormat: Text.PlainText
+            elide: Text.ElideLeft
+            color: root.filterText ? root.foreground : root.muted
+            font.family: root.fontFamily
+            font.pixelSize: Style.font.body
+            text: "Search  " + root.filterText + (root.caretOn ? "▌" : " ")
+              + (root.filterText ? "" : "  type a name or number")
           }
 
           Rectangle {
