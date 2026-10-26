@@ -42,6 +42,28 @@ class UserError(Exception):
     pass
 
 
+# A "-" argument means the value is one line on stdin, so a phone number or
+# keypad digit is not a process argument. Anything longer is refused.
+STDIN_ARG_MAX = 256
+
+
+def private_arg(value, what, limit=STDIN_ARG_MAX):
+    """Return a CLI value. ``-`` reads one line from stdin and does not echo it."""
+    if value != "-":
+        return value
+    line = sys.stdin.readline(limit + 1)
+    if line == "":
+        raise UserError(f"no {what} given")
+    ended = line.endswith("\n")
+    if ended:
+        line = line[:-1]
+        if line.endswith("\r"):
+            line = line[:-1]
+    if len(line) > limit:
+        raise UserError(f"{what} is too long")
+    return line
+
+
 def log(message):
     print(message, file=sys.stderr, flush=True)
 
@@ -281,7 +303,7 @@ def cmd_disconnect(args):
 
 
 def cmd_call(args):
-    number = phone.normalize(args.number)
+    number = phone.normalize(private_arg(args.number, "number"))
     tel = PhoneTelephony()
     tel.set_reject_sco(False)  # this call belongs to the PC: accept its audio
     tel.dial(number)
@@ -342,12 +364,13 @@ def cmd_hangup(_args):
 
 
 def cmd_tones(args):
-    if not phone.valid_dtmf(args.tones):
+    tones = private_arg(args.tones, "tones")
+    if not phone.valid_dtmf(tones):
         raise UserError("tones may only contain 0-9, *, #, A-D")
     tel, _, calls = telephony_and_calls()
     if not find_call(calls, ("active",)):
         raise UserError("tones can only be sent during an active call")
-    tel.send_tones(args.tones)
+    tel.send_tones(tones)
 
 
 def cmd_mute(args):
@@ -719,7 +742,7 @@ def build_parser():
         p.set_defaults(func=func)
 
     p = sub.add_parser("call", help="dial a number")
-    p.add_argument("number")
+    p.add_argument("number", help="number to dial, or - to read one line from stdin")
     p.set_defaults(func=cmd_call)
 
     for name, func, text in (("answer", cmd_answer, "answer the incoming call"),
@@ -730,7 +753,7 @@ def build_parser():
     sub.add_parser("take", help="move a call running on the iPhone to the PC").set_defaults(func=cmd_take)
 
     p = sub.add_parser("tones", help="send DTMF tones during a call")
-    p.add_argument("tones")
+    p.add_argument("tones", help="digits to send, or - to read one line from stdin")
     p.set_defaults(func=cmd_tones)
 
     p = sub.add_parser("mute", help="mute the PC microphone for the call")

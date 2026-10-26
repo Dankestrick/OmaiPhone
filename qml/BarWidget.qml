@@ -67,7 +67,7 @@ Panel {
 
   // ---------------------------------------------------------------------------
 
-  function run(args) { if (svc) svc.run(args) }
+  function run(args, stdin) { if (svc) svc.run(args, stdin) }
 
   function setTab(name) {
     tab = name
@@ -118,11 +118,12 @@ Panel {
   function dial(number) {
     if (!caps.canDial || !validNumber(number)) return
     dialNumber = number
-    run(["call", number])
+    // The number is stdin, not an argument. Other accounts can read argv.
+    run(["call", "-"], String(number) + "\n")
   }
 
   function pressKey(key) {
-    if (inCall && caps.canSendTones) run(["tones", key])
+    if (inCall && caps.canSendTones) run(["tones", "-"], String(key) + "\n")
     else dialNumber = dialNumber + key
   }
 

@@ -1,9 +1,11 @@
+import io
 import json
 import os
 import sys
 import tempfile
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), "..", "backend"))
 
@@ -423,13 +425,153 @@ class ContactsTests(unittest.TestCase):
             self.assertEqual(len(text.encode()), self.contacts.MAX_DOWNLOAD_BYTES)
 
 
+class StdinSecretTests(unittest.TestCase):
+    NUMBER = "+15551230099"
+
+    def test_dash_reads_one_line_and_leaves_the_rest(self):
+        from omaiphone.cli import private_arg
+        stdin = io.StringIO("+1 (555) 010-0199\nleftover\n")
+        with mock.patch("sys.stdin", stdin):
+            self.assertEqual(private_arg("-", "number"), "+1 (555) 010-0199")
+            self.assertEqual(stdin.readline(), "leftover\n")
+
+    def test_a_real_argument_does_not_touch_stdin(self):
+        from omaiphone.cli import private_arg
+        stdin = io.StringIO("should-stay\n")
+        with mock.patch("sys.stdin", stdin):
+            self.assertEqual(private_arg("+436601234567", "number"), "+436601234567")
+            self.assertEqual(private_arg("-1", "number"), "-1")
+            self.assertEqual(stdin.readline(), "should-stay\n")
+
+    def test_missing_and_overlong_stdin_are_refused(self):
+        from omaiphone.cli import UserError, private_arg
+        with mock.patch("sys.stdin", io.StringIO("")):
+            with self.assertRaises(UserError):
+                private_arg("-", "number")
+        with mock.patch("sys.stdin", io.StringIO("1" * 300 + "\n")):
+            with self.assertRaises(UserError):
+                private_arg("-", "tones")
+        with mock.patch("sys.stdin", io.StringIO("5\r\n")):
+            self.assertEqual(private_arg("-", "tones"), "5")
+
+    def test_call_dash_dials_the_stdin_line(self):
+        from omaiphone import cli
+        holder = {}
+
+        class FakeTel:
+            def __init__(self):
+                holder["tel"] = self
+
+            def set_reject_sco(self, value):
+                self.reject = value
+
+            def dial(self, number):
+                self.number = number
+
+        with mock.patch.object(cli, "PhoneTelephony", FakeTel), \
+             mock.patch.object(cli.audio, "write_private") as saved, \
+             mock.patch("sys.stdin", io.StringIO("+43 (660) 123-45.67\n")), \
+             mock.patch("sys.stdout", io.StringIO()):
+            cli.cmd_call(cli.build_parser().parse_args(["call", "-"]))
+        self.assertEqual(holder["tel"].number, "+436601234567")
+        self.assertIs(holder["tel"].reject, False)
+        self.assertEqual(saved.call_args[0][1], "+436601234567")
+
+    def test_call_argument_still_dials_without_reading_stdin(self):
+        from omaiphone import cli
+        holder = {}
+
+        class FakeTel:
+            def __init__(self):
+                holder["tel"] = self
+
+            def set_reject_sco(self, value):
+                self.reject = value
+
+            def dial(self, number):
+                self.number = number
+
+        stdin = io.StringIO("should-not-be-read\n")
+        with mock.patch.object(cli, "PhoneTelephony", FakeTel), \
+             mock.patch.object(cli.audio, "write_private"), \
+             mock.patch("sys.stdin", stdin), \
+             mock.patch("sys.stdout", io.StringIO()):
+            cli.cmd_call(cli.build_parser().parse_args(["call", "112"]))
+        self.assertEqual(holder["tel"].number, "112")
+        self.assertEqual(stdin.readline(), "should-not-be-read\n")
+
+    def test_tones_dash_sends_the_stdin_digit(self):
+        from omaiphone import cli
+        holder = {}
+
+        class FakeTel:
+            def send_tones(self, tones):
+                self.tones = tones
+
+        def telephony_and_calls():
+            tel = FakeTel()
+            holder["tel"] = tel
+            return tel, "/ag", [{"state": "active", "path": "/call"}]
+
+        with mock.patch.object(cli, "telephony_and_calls", telephony_and_calls), \
+             mock.patch("sys.stdin", io.StringIO("#\n")):
+            cli.cmd_tones(cli.build_parser().parse_args(["tones", "-"]))
+        self.assertEqual(holder["tel"].tones, "#")
+
+    def test_bad_tones_on_stdin_never_touch_the_phone(self):
+        from omaiphone import cli
+        with mock.patch.object(cli, "telephony_and_calls") as calls, \
+             mock.patch("sys.stdin", io.StringIO("hello\n")):
+            with self.assertRaises(cli.UserError):
+                cli.cmd_tones(cli.build_parser().parse_args(["tones", "-"]))
+        calls.assert_not_called()
+
+    def test_spawned_cmdline_does_not_contain_the_stdin_number(self):
+        import subprocess
+        backend = os.path.join(os.path.dirname(__file__), "..", "backend")
+        code = (
+            "import sys\n"
+            "from omaiphone.cli import private_arg\n"
+            "sys.stdout.write(private_arg(sys.argv[1], 'number'))\n"
+        )
+        proc = subprocess.Popen(
+            [sys.executable, "-c", code, "-"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            env={**os.environ, "PYTHONPATH": backend, "PYTHONDONTWRITEBYTECODE": "1"},
+        )
+        with open(f"/proc/{proc.pid}/cmdline", "rb") as handle:
+            cmdline = handle.read().replace(b"\0", b" ").decode()
+        out, err = proc.communicate(self.NUMBER + "\n", timeout=20)
+        self.assertEqual(proc.returncode, 0, err)
+        self.assertEqual(out, self.NUMBER)
+        self.assertNotIn(self.NUMBER, cmdline)
+        self.assertNotIn("15551230099", cmdline)
+
+    def test_panel_passes_call_and_tones_on_stdin(self):
+        root = os.path.join(os.path.dirname(__file__), "..")
+        with open(os.path.join(root, "qml", "BarWidget.qml")) as handle:
+            bar = handle.read()
+        with open(os.path.join(root, "qml", "Service.qml")) as handle:
+            service = handle.read()
+        self.assertIn('run(["call", "-"]', bar)
+        self.assertIn('run(["tones", "-"]', bar)
+        self.assertNotIn('run(["call", number])', bar)
+        self.assertNotIn('run(["tones", key])', bar)
+        self.assertIn("stdinText", service)
+        self.assertIn("write(line)", service)
+        self.assertNotIn("job.stdin", service.split("actionProcess.command", 1)[1].split("\n", 1)[0])
+
+
 class CliParserTests(unittest.TestCase):
     def test_every_command_parses(self):
         from omaiphone.cli import build_parser
         parser = build_parser()
         for argv in (["status", "--json"], ["devices"], ["pair"], ["connect"], ["disconnect"],
-                     ["call", "+43660"], ["answer"], ["reject"], ["hangup"], ["redial"], ["take"],
-                     ["tones", "1"], ["mute", "on"], ["noise", "off"], ["notifications", "off"], ["ringtone", "on"],
+                     ["call", "+43660"], ["call", "-"], ["answer"], ["reject"], ["hangup"], ["redial"], ["take"],
+                     ["tones", "1"], ["tones", "-"], ["mute", "on"], ["noise", "off"], ["notifications", "off"], ["ringtone", "on"],
                      ["contacts", "list", "--json"], ["history", "sync"], ["history", "--json"], ["history", "seen"], ["volume", "50"], ["watch"], ["daemon"], ["diagnostics"]):
             args = parser.parse_args(argv)
             self.assertTrue(callable(args.func), argv)

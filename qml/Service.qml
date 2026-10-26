@@ -12,7 +12,9 @@ import Quickshell.Io
 //   backend/texts/messagesd.py      texts (MAP via obexd)
 //
 // All three end with the shell (setpriv --pdeathsig). Every action is the
-// same CLI with an argument list; nothing goes through a shell.
+// same CLI with an argument list; nothing goes through a shell. A dialed
+// number or keypad digit is one line on that process's stdin (`call -`,
+// `tones -`), the same idea as a message body on the texts program's stdin.
 Item {
   id: root
 
@@ -72,19 +74,23 @@ Item {
   property string panelTab: ""
 
   // Actions run one after another so a quick second click is not lost.
+  // Each job is {args, stdin}. stdin is empty unless the value must stay off argv.
   property var queue: []
 
-  function run(args) {
+  function run(args, stdin) {
     lastError = ""
-    queue = queue.concat([args])
+    queue = queue.concat([{ args: args, stdin: stdin ? String(stdin) : "" }])
     pump()
   }
 
   function pump() {
     if (actionProcess.running || queue.length === 0) return
-    // Contact sync and connecting can take a while over Bluetooth.
-    actionProcess.command = root.ctl(120, queue[0])
+    var job = queue[0]
     queue = queue.slice(1)
+    // Contact sync and connecting can take a while over Bluetooth.
+    actionProcess.stdinText = job.stdin
+    actionProcess.stdinEnabled = job.stdin !== ""
+    actionProcess.command = root.ctl(120, job.args)
     actionProcess.running = true
   }
 
@@ -168,7 +174,18 @@ Item {
 
   Process {
     id: actionProcess
+    // One stdin line for call/tones. Cleared as soon as it is written.
+    property string stdinText: ""
+    onStarted: {
+      if (stdinText === "") return
+      var line = stdinText
+      stdinText = ""
+      write(line)
+      stdinEnabled = false
+    }
     onExited: {
+      stdinText = ""
+      stdinEnabled = false
       if (!statusOnceProcess.running) statusOnceProcess.running = true
       root.pump()
     }

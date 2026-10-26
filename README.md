@@ -81,7 +81,7 @@ omarchy-shell io.github.dankestrick.omaiphone.phone mute
 ```
 
 `backend/omaiphone-ctl` is the same backend as a command line tool
-(`omaiphone-ctl status`, `call <number>`, `contacts sync`, `diagnostics`).
+(`omaiphone-ctl status`, `call -` or `call <number>`, `contacts sync`, `diagnostics`).
 
 ## How it works
 
@@ -99,6 +99,8 @@ second time.
 ## Permissions and safety
 
 OmaiPhone runs as your user. At runtime, OmaiPhone does not use sudo or pkexec.
+
+The panel dials with `omaiphone-ctl call -` and sends a keypad digit with `omaiphone-ctl tones -`. The number or digit is one line on that program's stdin, not a process argument. From a terminal, `call -` and `tones -` read one line, or you can pass the value as an argument yourself. Message text already goes to the texts program on stdin.
 
 The shell starts `omaiphone-ctl daemon` and `backend/texts/messagesd.py`.
 `setpriv` only makes those two exit with the shell. If obexd is not already
