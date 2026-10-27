@@ -161,6 +161,10 @@ class Daemon:
                 and ag_path_of(event["path"]) not in self.addresses:
             return  # a call on another phone
         if kind == "phone-connected":
+            if audio.stay_disconnected():
+                # Disconnect is still on. Something else brought the radio back.
+                self._drop_unwanted_link(event.get("address") or "")
+                return
             self.addresses[event["path"]] = event.get("address", "")
             log(f"phone connected: {event['path']}")
             if not self.calls:
@@ -194,6 +198,22 @@ class Daemon:
             log(f"audio link: {event.get('state', '')} {event.get('codec', '')}".strip())
         self._update_ringer()
         self._sync_audio()
+
+    def _drop_unwanted_link(self, address):
+        """Drop a link that came back while Disconnect is still on.
+
+        Does not change Trusted and does not go through the CLI, so the
+        journal keeps the user's click as the only disconnect action.
+        """
+        if not audio.stay_disconnected():
+            return
+        try:
+            bus = bluez.system_bus()
+            device = bluez.find_phone(bus, address or None)
+            bluez.disconnect(bus, device)
+            log("iPhone connected while Disconnect is on; disconnected it again")
+        except bluez.BluetoothError as error:
+            log(f"could not keep the iPhone disconnected: {error}")
 
     def _calls_stay_on_phone(self, address=None):
         """Default: refuse the phone's voice link so iPhone-side calls stay there."""

@@ -275,6 +275,13 @@ def cmd_devices(args):
 def cmd_connect(args):
     bus = bluez.system_bus()
     device = bluez.find_phone(bus, args.address)
+    # Clear before the radio comes up, or the calls daemon treats this
+    # connection as a surprise and drops it again.
+    audio.set_stay_disconnected(False)
+    try:
+        bluez.set_property(bus, device["path"], bluez.DEVICE_IFACE, "Trusted", GLib.Variant("b", True))
+    except bluez.BluetoothError:
+        pass
     print(f"Connecting to {device['name']} (HFP)...")
     bluez.connect(bus, device)
     if args.address:
@@ -298,6 +305,17 @@ def cmd_connect(args):
 def cmd_disconnect(args):
     bus = bluez.system_bus()
     device = bluez.find_phone(bus, args.address)
+    # Set before Disconnect returns. The texts daemon sees the drop and
+    # would otherwise call Device.Connect again after its first 3 s wait.
+    audio.set_stay_disconnected(True)
+    # Trusted is what lets the iPhone open HFP, A2DP and MAP on its own.
+    # Clearing it stops that. Blocked would mark the phone blocked in every
+    # Bluetooth list and would stick if this program exited, so the phone
+    # stays paired and only loses trust until Connect.
+    try:
+        bluez.set_property(bus, device["path"], bluez.DEVICE_IFACE, "Trusted", GLib.Variant("b", False))
+    except bluez.BluetoothError:
+        pass
     bluez.disconnect(bus, device)
     print(f"Disconnected {device['name']}.")
 
@@ -623,6 +641,7 @@ def cmd_pair(args):
     if not device["phone"]:
         raise UserError(f"{device['name']} paired, but it is not a phone; it was not saved as the iPhone "
                         "(remove it in the Bluetooth settings if it should not be there)")
+    audio.set_stay_disconnected(False)
     bluez.set_property(bus, device["path"], bluez.DEVICE_IFACE, "Trusted", GLib.Variant("b", True))
     bluez.pin(device)
     print(f"Paired and trusted: {device['name']} ({device['address']})")

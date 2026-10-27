@@ -16,6 +16,7 @@ import json
 import os
 import re
 import subprocess
+import sys
 import tempfile
 import time
 from pathlib import Path
@@ -63,8 +64,12 @@ _MAX_OBJECT_PATH = 240
 # to parse a file that has grown past the download cap.
 _MAX_CONTACTS_FILE = 2 * 1024 * 1024
 # Seconds between tries to get a dropped message link back. The last one
-# repeats until the phone is back in range.
+# repeats until the phone is back in range. A panel Disconnect pauses the
+# loop (see _HOLD_POLL) until Connect.
 _RELINK_DELAYS = (3, 5, 10, 20, 30, 60)
+# How often to look at stayDisconnected while the user wants the phone down.
+_HOLD_POLL = 1
+HELD_DETAIL = "Disconnected. Press Connect when you want the iPhone back."
 # dbus-next waits for a reply forever. A stuck obexd or BlueZ must not hold
 # self.lock, so every call gives up after these many seconds. Pairing waits
 # for a tap on the iPhone (the agent allows 90), so it gets longer.
@@ -418,8 +423,40 @@ class BluetoothSession:
         await self._adopt_paired_iphone()
         await self._refresh_presence()
         self.push_status()
-        if self.store.settings()["phoneAddress"]:
-            self._track(self._safe_reconnect())
+        self._arm_link()
+
+    def _backend_on_path(self) -> None:
+        folder = str(Path(__file__).resolve().parents[1])
+        if folder not in sys.path:
+            sys.path.insert(0, folder)
+
+    def _link_held(self) -> bool:
+        """The user pressed Disconnect and has not pressed Connect since."""
+        self._backend_on_path()
+        from omaiphone.audio import stay_disconnected
+
+        return stay_disconnected()
+
+    def _release_link_hold(self) -> None:
+        """Pairing is an explicit request for the link."""
+        self._backend_on_path()
+        from omaiphone.audio import set_stay_disconnected
+
+        set_stay_disconnected(False)
+
+    def _arm_link(self) -> None:
+        """Open the message link, or wait if Disconnect is still on."""
+        if not self.store.settings()["phoneAddress"]:
+            return
+        if self._link_held():
+            self.state = "phone_nearby"
+            self.detail = HELD_DETAIL
+            self.push_status()
+            if not self._relinking:
+                self._relinking = True
+                self._track(self._relink())
+            return
+        self._track(self._safe_reconnect())
 
     async def reconnect(self) -> None:
         """Try the message link again. Used after the iPhone switches are turned on."""
@@ -529,6 +566,9 @@ class BluetoothSession:
 
     async def pair(self, address: str, explicit: bool) -> None:
         async with self.lock:
+            # Pairing means the user wants this phone up. Clear a Disconnect
+            # before any Connect, or the calls daemon would drop the new link.
+            self._release_link_hold()
             self.pair_fallback = False
             previous = _read_adapter_class()
             self._saved_class = previous
@@ -605,24 +645,40 @@ class BluetoothSession:
         # would block the new one (the iPhone allows only one).
         self._track(self._remove_session(old_path))
         self.state = "phone_nearby"
-        self.detail = "The message link dropped. Reconnecting."
+        self.detail = HELD_DETAIL if self._link_held() else "The message link dropped. Reconnecting."
         self.push_status()
         if not self._relinking:
             self._relinking = True
             self._track(self._relink())
 
     async def _relink(self) -> None:
-        """Retry the message link until it is back, slowing down over time."""
+        """Retry the message link until it is back, slowing down over time.
+
+        While stayDisconnected is set this only waits. Connect clears the
+        flag and the next pass opens the link, including after this process
+        is restarted.
+        """
         try:
             attempt = 0
+            # Connect just cleared the hold: open now, do not sit through the
+            # backoff that is meant for a link that dropped on its own.
+            woke = False
             while self._session_bus and not self._map_path:
-                await asyncio.sleep(_RELINK_DELAYS[min(attempt, len(_RELINK_DELAYS) - 1)])
+                if self._link_held():
+                    woke = True
+                    await asyncio.sleep(_HOLD_POLL)
+                    continue
+                if not woke:
+                    await asyncio.sleep(_RELINK_DELAYS[min(attempt, len(_RELINK_DELAYS) - 1)])
+                woke = False
                 attempt += 1
                 settings = self.store.settings()
                 if self._map_path or not settings["phoneAddress"]:
                     return
                 if self.state in ("pairing", "scanning"):
                     # Wait for pairing or the scan to finish, then try again.
+                    continue
+                if self._link_held():
                     continue
                 await self._safe_reconnect()
         finally:
@@ -645,6 +701,8 @@ class BluetoothSession:
         return self._map_path in objects
 
     async def send(self, address: str, body: str) -> None:
+        if self._link_held():
+            raise RuntimeError("The iPhone is disconnected. Press Connect first.")
         if not self._map_path:
             await self._safe_reconnect()
         try:
@@ -742,6 +800,11 @@ class BluetoothSession:
         address = settings["phoneAddress"]
         if not address:
             return
+        if self._link_held():
+            self.state = "phone_nearby"
+            self.detail = HELD_DETAIL
+            self.push_status()
+            return
         self.state = "phone_nearby"
         self.detail = "Reconnecting to the paired iPhone."
         self.push_status()
@@ -751,7 +814,13 @@ class BluetoothSession:
         except Exception:
             connected = False
         if not connected:
-            await device.call_connect()
+            try:
+                await device.call_connect()
+            except Exception as exc:
+                text = str(exc).lower()
+                # Connect from the panel can win the race. The link is up.
+                if "already" not in text and "in progress" not in text:
+                    raise
         await self._open_profiles(address, announce=False)
 
     async def _reset_phone_link(self, address: str) -> None:
@@ -759,8 +828,11 @@ class BluetoothSession:
 
         After the iPhone switch is turned on, the old link can still be
         missing the message service. A fresh connection makes the phone
-        advertise it again.
+        advertise it again. A panel Disconnect skips this so the phone
+        stays down until Connect.
         """
+        if self._link_held():
+            return
         if await self._in_call():
             return   # dropping the link now would end the phone call
         device = await self._device(address)

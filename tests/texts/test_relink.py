@@ -47,6 +47,8 @@ class RelinkTests(unittest.TestCase):
 
         self.session._managed = managed
         self.session._safe_reconnect = reconnect
+        # The real check reads the user's config. Tests decide the hold.
+        self.session._link_held = lambda: False
 
     def _drop(self):
         self.live = {}
@@ -150,6 +152,148 @@ class RelinkTests(unittest.TestCase):
             bluetooth._RELINK_DELAYS = delays
         self.assertEqual(self.reconnects, 1)
         self.assertEqual(self.session._map_path, NEW_SESSION)
+
+    def test_relink_does_not_connect_until_the_hold_clears(self):
+        self._drop()
+        held = {"on": True}
+        self.session._link_held = lambda: held["on"]
+        delays = bluetooth._RELINK_DELAYS
+        poll = bluetooth._HOLD_POLL
+        bluetooth._RELINK_DELAYS = (0,)
+        bluetooth._HOLD_POLL = 0
+        try:
+            async def run():
+                await self.session._collect_live_messages(False)
+                for _ in range(5):
+                    await asyncio.sleep(0)
+                self.assertEqual(self.reconnects, 0)
+                self.assertEqual(self.session.state, "phone_nearby")
+                self.assertIn("Press Connect", self.session.detail)
+                held["on"] = False
+                await asyncio.gather(*self.session._tasks)
+
+            asyncio.run(run())
+        finally:
+            bluetooth._RELINK_DELAYS = delays
+            bluetooth._HOLD_POLL = poll
+        self.assertEqual(self.reconnects, 1)
+        self.assertEqual(self.session._map_path, NEW_SESSION)
+
+    def test_send_while_held_does_not_reconnect(self):
+        self.session._link_held = lambda: True
+        self.session._map_path = ""
+        with self.assertRaisesRegex(RuntimeError, "Press Connect"):
+            asyncio.run(self.session.send("+15551234567", "hi"))
+        self.assertEqual(self.reconnects, 0)
+
+    def test_arm_while_held_waits_instead_of_connecting(self):
+        started = []
+
+        async def relink():
+            started.append("relink")
+
+        self.session._link_held = lambda: True
+        self.session._relink = relink
+
+        async def run():
+            self.session._arm_link()
+            await asyncio.gather(*self.session._tasks)
+
+        asyncio.run(run())
+        self.assertEqual(started, ["relink"])
+        self.assertEqual(self.reconnects, 0)
+        self.assertIn("Press Connect", self.session.detail)
+
+    def test_arm_when_connect_is_allowed_reconnects(self):
+        async def run():
+            self.session._arm_link()
+            await asyncio.gather(*self.session._tasks)
+
+        asyncio.run(run())
+        self.assertEqual(self.reconnects, 1)
+
+
+class ConnectSavedTests(unittest.TestCase):
+    def _session(self):
+        session = bluetooth.BluetoothSession(FakeStore(), lambda event: None)
+        return session
+
+    def test_held_never_asks_bluez_to_connect(self):
+        session = self._session()
+        session._link_held = lambda: True
+        called = []
+
+        async def device(address):
+            called.append(address)
+
+        session._device = device
+        asyncio.run(session._connect_saved())
+        self.assertEqual(called, [])
+        self.assertEqual(session.state, "phone_nearby")
+        self.assertIn("Press Connect", session.detail)
+
+    def test_not_held_connects_a_down_radio_then_opens_messages(self):
+        session = self._session()
+        session._link_held = lambda: False
+        calls = []
+
+        class Dev:
+            async def get_connected(self):
+                return False
+
+            async def call_connect(self):
+                calls.append("connect")
+
+        async def device(address):
+            calls.append(address)
+            return Dev()
+
+        async def open_profiles(address, announce):
+            calls.append(("profiles", address, announce))
+
+        session._device = device
+        session._open_profiles = open_profiles
+        asyncio.run(session._connect_saved())
+        self.assertEqual(calls, [
+            "74:D5:E8:00:00:01",
+            "connect",
+            ("profiles", "74:D5:E8:00:00:01", False),
+        ])
+
+    def test_connect_already_in_progress_still_opens_messages(self):
+        session = self._session()
+        session._link_held = lambda: False
+        calls = []
+
+        class Dev:
+            async def get_connected(self):
+                return False
+
+            async def call_connect(self):
+                raise RuntimeError("Operation already in progress")
+
+        async def device(address):
+            return Dev()
+
+        async def open_profiles(address, announce):
+            calls.append(address)
+
+        session._device = device
+        session._open_profiles = open_profiles
+        asyncio.run(session._connect_saved())
+        self.assertEqual(calls, ["74:D5:E8:00:00:01"])
+
+    def test_reset_while_held_does_not_touch_the_radio(self):
+        session = self._session()
+        session._link_held = lambda: True
+        called = []
+
+        async def device(address):
+            called.append(address)
+
+        session._device = device
+        asyncio.run(session._reset_phone_link("74:D5:E8:00:00:01"))
+        self.assertEqual(called, [])
 
 
 class BoundedBusTests(unittest.TestCase):

@@ -69,6 +69,21 @@ def noise_suppression_enabled(path=CONFIG_FILE):
     return load_config(path).get("noiseSuppression", True) is not False
 
 
+def stay_disconnected(path=CONFIG_FILE):
+    """True after Disconnect, until Connect. Missing means the link may come up."""
+    return load_config(path).get("stayDisconnected") is True
+
+
+def set_stay_disconnected(held, path=CONFIG_FILE):
+    """Remember a panel Disconnect. Writes only when the value changes."""
+    config = load_config(path)
+    want = bool(held)
+    if (config.get("stayDisconnected") is True) == want:
+        return
+    config["stayDisconnected"] = want
+    save_config(config, path)
+
+
 class AudioRouter:
     def __init__(self, runner=subprocess.run, state_file=STATE_FILE):
         self.runner = runner
