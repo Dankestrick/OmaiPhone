@@ -3,6 +3,7 @@ import QtQuick.Layouts
 import Quickshell
 import Quickshell.Hyprland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Bar icon plus the iPhone dropdown: calls, texts, the iPhone's notifications,
@@ -29,10 +30,10 @@ Panel {
   readonly property int unread: svc ? svc.unread : 0
   readonly property int badge: missed + unread
 
-  readonly property color fg: bar ? bar.foreground : Color.foreground
+  readonly property color fg: bar ? bar.foreground : Commons.Color.foreground
   readonly property color dim: Qt.darker(fg, 1.4)
-  readonly property color accent: Color.accent
-  readonly property color urgent: bar ? bar.urgent : Color.urgent
+  readonly property color accent: Commons.Color.accent
+  readonly property color urgent: bar ? bar.urgent : Commons.Color.urgent
   readonly property string fontFamily: bar ? bar.fontFamily : Style.font.family
   function tint(c) { return Qt.rgba(c.r, c.g, c.b, 0.16) }
 
@@ -219,7 +220,7 @@ Panel {
         anchors.centerIn: parent
         textFormat: Text.PlainText
         text: root.badge > 9 ? "9+" : String(root.badge)
-        color: root.bar ? root.bar.background : Color.background
+        color: root.bar ? root.bar.background : Commons.Color.background
         font.family: root.fontFamily
         font.pixelSize: Style.space(8)
         font.bold: true

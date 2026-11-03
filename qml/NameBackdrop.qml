@@ -1,5 +1,6 @@
 import QtQuick
 import qs.Commons
+import qs.Commons as Commons
 import "Logo.js" as Logo
 
 // Faint "OMAIPHONE" in the font of Omarchy's logo, repeated in rows that run
@@ -10,7 +11,7 @@ Item {
   anchors.fill: parent
   clip: true
 
-  property color color: Color.accent
+  property color color: Commons.Color.accent
   property string fontFamily: Style.font.family
   // How strong the pattern is.
   property real strength: 0.09
