@@ -4,6 +4,7 @@ import Quickshell
 import Quickshell.Io
 import Quickshell.Wayland
 import qs.Commons
+import qs.Commons as Commons
 import qs.Ui
 
 // Centered terminal-style card. The dim layer behind it is the overlay;
@@ -54,15 +55,15 @@ Item {
   readonly property var svc: (shell && shell.serviceFor)
     ? shell.serviceFor((manifest && manifest.id) || "io.github.dankestrick.omaiphone") : null
 
-  property color background: Color.menu.background
-  property color foreground: Color.menu.text
-  property color border: Color.menu.border
+  property color background: Commons.Color.menu.background
+  property color foreground: Commons.Color.menu.text
+  property color border: Commons.Color.menu.border
   property var borderSpec: Border.surfaceSpec("menu", "border", border, Math.max(1, Style.space(2)))
-  property color scrim: Color.menu.scrim
-  property color selectedBackground: Color.accent
-  property color selectedText: Color.background
+  property color scrim: Commons.Color.menu.scrim
+  property color selectedBackground: Commons.Color.accent
+  property color selectedText: Commons.Color.background
   property color incomingBubble: Util.alpha(foreground, 0.12)
-  property color muted: Color.muted
+  property color muted: Commons.Color.muted
   property string fontFamily: Style.font.family
   readonly property int cornerRadius: Style.cornerRadius
   property int contentMargin: Style.spacing.panelPadding
